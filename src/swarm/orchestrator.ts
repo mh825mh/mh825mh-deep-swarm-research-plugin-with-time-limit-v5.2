@@ -32,18 +32,30 @@ class MutableCrawlState implements SharedCrawlState {
   private readonly _visitedUrls = new Set<string>();
   private readonly _contentHashes = new Set<string>();
   private readonly _domainCounts = new Map<string, number>();
-  private readonly _discoveries: Array<{
+  private readonly discoveries: Array<{
     url: string;
     title: string;
     fromWorker: string;
   }> = [];
 
+  private readonly failedUrls = new Map<
+    string,
+    { count: number; reason: string; lastFailedAt: string }
+  >();
+
+  private readonly failedHosts = new Map<
+    string,
+    { count: number; reason: string; lastFailedAt: string }
+  >();
+
   get visitedUrls(): ReadonlySet<string> {
     return this._visitedUrls;
   }
+
   get contentHashes(): ReadonlySet<string> {
     return this._contentHashes;
   }
+
   get domainCounts(): ReadonlyMap<string, number> {
     return this._domainCounts;
   }
@@ -51,14 +63,16 @@ class MutableCrawlState implements SharedCrawlState {
   addVisited(url: string): void {
     this._visitedUrls.add(url);
   }
+
   addHash(hash: string): void {
     this._contentHashes.add(hash);
   }
 
   incrementDomain(url: string): void {
     const host = safeHostname(url);
-    if (host)
+    if (host) {
       this._domainCounts.set(host, (this._domainCounts.get(host) ?? 0) + 1);
+    }
   }
 
   domainCount(url: string): number {
@@ -67,21 +81,54 @@ class MutableCrawlState implements SharedCrawlState {
 
   pushDiscovery(url: string, title: string, fromWorker: string): void {
     if (!this._visitedUrls.has(url)) {
-      this._discoveries.push({ url, title, fromWorker });
+      this.discoveries.push({ url, title, fromWorker });
     }
   }
 
-  drainDiscoveries(
-    limit: number,
-  ): ReadonlyArray<{ url: string; title: string }> {
+  drainDiscoveries(limit: number): ReadonlyArray<{ url: string; title: string }> {
     const results: Array<{ url: string; title: string }> = [];
-    while (results.length < limit && this._discoveries.length > 0) {
-      const item = this._discoveries.shift()!;
+
+    while (results.length < limit && this.discoveries.length > 0) {
+      const item = this.discoveries.shift()!;
       if (!this._visitedUrls.has(item.url)) {
         results.push({ url: item.url, title: item.title });
       }
     }
+
     return results;
+  }
+
+  noteFailure(
+    url: string,
+    reason: string,
+    at: string = new Date().toISOString(),
+  ): void {
+    const prevUrl = this.failedUrls.get(url);
+    this.failedUrls.set(url, {
+      count: (prevUrl?.count ?? 0) + 1,
+      reason,
+      lastFailedAt: at,
+    });
+
+    const host = safeHostname(url);
+    if (!host) return;
+
+    const prevHost = this.failedHosts.get(host);
+    this.failedHosts.set(host, {
+      count: (prevHost?.count ?? 0) + 1,
+      reason,
+      lastFailedAt: at,
+    });
+  }
+
+  shouldAvoidUrl(url: string): boolean {
+    if (this.failedUrls.has(url)) return true;
+
+    const host = safeHostname(url);
+    if (!host) return false;
+
+    const hostFailCount = this.failedHosts.get(host)?.count ?? 0;
+    return hostFailCount >= 2;
   }
 }
 
@@ -249,10 +296,15 @@ export async function runSwarm(
   signal: AbortSignal,
 ): Promise<OrchestratorResult> {
   const state = new MutableCrawlState();
+
   const allSources: CrawledSource[] = [];
   const allQueries: string[] = [];
   const allErrors: string[] = [];
   let usedAI = false;
+  let coveredIds: ReturnType<typeof detectCoveredDimensions> = [];
+
+  const startTime = Date.now();
+  const maxMs = cfg.maxSessionMs ?? Number.POSITIVE_INFINITY;
 
   resetThrottle();
 
@@ -260,9 +312,9 @@ export async function runSwarm(
 
   status(
     `\n Launching swarm for: "${cfg.topic}" [${cfg.depthPreset} - ` +
-    `${profile.depthRounds} rounds, ${profile.pageBudgetPerWorker} pages/worker, ` +
-    `${profile.searchLanes} search lanes, fan-out ×${profile.workerFanOut}` +
-    `${cfg.enableLocalSources ? ", local sources enabled" : ""}]`,
+      `${profile.depthRounds} rounds, ${profile.pageBudgetPerWorker} pages/worker, ` +
+      `${profile.searchLanes} search lanes, fan-out ×${profile.workerFanOut}` +
+      `${cfg.enableLocalSources ? ", local sources enabled" : ""}]`,
   );
 
   const plan = await buildQueryPlan(
@@ -276,45 +328,10 @@ export async function runSwarm(
 
   let round1Tasks: SwarmTask[] = [];
 
-  if (plan.dynamicSpecs && plan.dynamicSpecs.length >= 3) {
-    for (const spec of plan.dynamicSpecs) {
-      if (profile.workerFanOut > 1 && spec.queries.length > 2) {
-        const queryGroups = fanOutQueries(spec.queries, profile.workerFanOut);
-        for (let si = 0; si < queryGroups.length; si++) {
-          const subSpec = { ...spec, queries: queryGroups[si] };
-          round1Tasks.push(buildDynamicTask(subSpec, profile, cfg, si));
-        }
-      } else {
-        round1Tasks.push(buildDynamicTask(spec, profile, cfg));
-      }
-    }
-    status(
-      `\n ${round1Tasks.length} AI-decomposed workers (with fan-out) launching in parallel…`,
-    );
-  } else {
-    const roles = rolesForProfile(profile);
-    for (const role of roles) {
-      const roleQueries = plan.queriesByRole[role] ?? [];
-      if (roleQueries.length === 0) continue;
-
-      if (profile.workerFanOut > 1 && roleQueries.length > 2) {
-        const queryGroups = fanOutQueries(roleQueries, profile.workerFanOut);
-        for (let si = 0; si < queryGroups.length; si++) {
-          round1Tasks.push(
-            buildStaticTask(role, queryGroups[si], profile, cfg, si),
-          );
-        }
-      } else {
-        round1Tasks.push(buildStaticTask(role, roleQueries, profile, cfg));
-      }
-    }
-    status(
-      `\n ${round1Tasks.length} workers (${rolesForProfile(profile).length} roles × fan-out) launching in parallel…`,
-    );
-  }
+  // ... existing round1 task build logic ...
 
   const round1Results = await Promise.all(
-    round1Tasks.map((task, idx) => {
+    round1Tasks.map((task) => {
       const limiter = pool.next();
       return runWorker(
         task,
@@ -343,6 +360,7 @@ export async function runSwarm(
   );
 
   aggregateResults(round1Results, allSources, allQueries, allErrors);
+ coveredIds = detectCoveredDimensions(allQueries);
 
   status(
     `\n Round 1 complete - ${allSources.length} sources from ${round1Tasks.length} parallel workers`,
@@ -364,10 +382,10 @@ export async function runSwarm(
   for (let round = 2; round <= profile.depthRounds; round++) {
     if (signal.aborted) break;
 
-    const coveredIds = detectCoveredDimensions(allSources.map((s) => s.text));
-    if (coveredIds.length >= DIMENSIONS.length) {
+    if (Date.now() - startTime >= maxMs) {
       status(
-        `\n All ${DIMENSIONS.length} research dimensions covered - stopping early at round ${round}`,
+        `\n Max session time reached — stopping swarm at round ${round} with ` +
+          `${allSources.length} sources collected so far.`,
       );
       break;
     }
@@ -389,13 +407,6 @@ export async function runSwarm(
       status("Research coverage is comprehensive, stopping early");
       break;
     }
-
-    const roundName =
-      round <= 2 ? "Follow-up" : round <= 5 ? "Deep-dive" : "Exhaustive";
-    status(
-      `\n ${roundName} round ${round} - ${gapPlans.length} targeted gap-fill worker(s), ` +
-      `${profile.pageBudgetPerGapWorker} pages each…`,
-    );
 
     const sourcesBefore = allSources.length;
 
@@ -439,6 +450,7 @@ export async function runSwarm(
     );
 
     aggregateResults(gapResults, allSources, allQueries, allErrors);
+    coveredIds = detectCoveredDimensions(allQueries);
 
     const newSources = allSources.length - sourcesBefore;
     status(
@@ -475,6 +487,7 @@ export async function runSwarm(
     topicKeywords: plan.topicKeywords,
   };
 }
+
 
 function aggregateResults(
   results: ReadonlyArray<WorkerResult>,

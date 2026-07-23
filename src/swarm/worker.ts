@@ -51,6 +51,8 @@ export interface SharedCrawlState {
   addHash(hash: string): void;
   incrementDomain(url: string): void;
   domainCount(url: string): number;
+  noteFailure(url: string, reason: string): void;
+  shouldAvoidUrl(url: string): boolean;
   pushDiscovery(url: string, title: string, fromWorker: string): void;
   drainDiscoveries(
     limit: number,
@@ -356,11 +358,13 @@ async function fetchBatch(
     !signal.aborted
   ) {
     const batch = candidates
-      .slice(idx, idx + concurrency)
-      .filter(
-        (c) =>
-          !state.visitedUrls.has(c.url) && state.domainCount(c.url) < domainCap,
-      );
+  .slice(idx, idx + concurrency)
+  .filter(
+    (c) =>
+      !state.visitedUrls.has(c.url) &&
+      state.domainCount(c.url) < domainCap &&
+      !state.shouldAvoidUrl(c.url),
+  );
     idx += concurrency;
 
     if (batch.length === 0) continue;
@@ -380,14 +384,14 @@ async function fetchBatch(
       if (signal.aborted) return;
 
       if (result.status === "rejected") {
-        if (!isAbortError(result.reason)) {
-          warn(
-            `${tag} Failed: ${truncUrl(candidate.url)} - ${errorMessage(result.reason)}`,
-          );
-          errors.push(`fetch:${candidate.url}: ${errorMessage(result.reason)}`);
-        }
-        continue;
-      }
+   if (!isAbortError(result.reason)) {
+     const msg = errorMessage(result.reason);
+     state.noteFailure(candidate.url, msg);
+     warn(`${tag} Failed: ${truncUrl(candidate.url)} - ${msg}`);
+     errors.push(`fetch:${candidate.url}: ${msg}`);
+   }
+   continue;
+ }
 
       const page = result.value;
       if (page.wordCount < MIN_USEFUL_WORD_COUNT) continue;

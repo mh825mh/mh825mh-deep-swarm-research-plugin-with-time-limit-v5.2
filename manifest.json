@@ -1,7 +1,7 @@
 {
 	"type": "plugin",
 	"runner": "node",
-	"owner": "khtsly",
-	"name": "deep-swarm-research",
+	"owner": "mh825",
+	"name": "deep-swarm-research-plugin-with-time-limit",
 	"revision": 1
 }

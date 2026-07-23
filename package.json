@@ -1,6 +1,6 @@
 {
   "name": "lms-plugin-deep-swarm-research",
-  "version": "1.0.4",
+  "version": "1.0.3",
   "description": "LM Studio plugin for Deep Research - autonomously searches, reads, and synthesizes multi-source web research in one tool call.",
   "main": "dist/index.js",
   "scripts": {
@@ -8,7 +8,7 @@
     "dev": "tsc && lms dev",
     "push": "lms push"
   },
-  "author": "user",
+  "author": "mh825",
   "license": "MIT",
   "dependencies": {
     "@lmstudio/sdk": "^1.5.0",

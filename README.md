@@ -2,7 +2,14 @@
 
 Autonomous deep research for LM Studio. A swarm of specialized workers searches your **local libraries** and the web, then synthesizes everything into a structured report - one tool call, no API keys.
 
-Deep Research now supports a configurable max session time. Each run can be capped by a user‑defined wall‑clock limit, and the session is cleanly aborted once that limit is reached, while still respecting LM Studio’s own tool timeout and user cancel actions.
+v1 - 	Deep Research now supports a configurable max session time. Each run can be capped by a user‑defined wall‑clock limit, So once your timer aborts the signal, future rounds stop, but any workers already running in the current round still finish before Swarm resolve it. 
+
+v2 - 	Added session timeout support to the Research tool so long-running deep research jobs can stop automatically after a configurable time limit
+
+v3 - 	Added failure memory to the swarm crawl state so failed URLs and repeatedly failing hosts are tracked and can be skipped on later fetch attempts.
+		Updated worker fetch flow to support avoiding blocked or unstable sources instead of retrying the same bad URLs repeatedly.
+		Fixed MutableCrawlState integration in the orchestrator so shared crawl state can carry both normal crawl tracking and failure tracking across workers.
+
 
 ---
 

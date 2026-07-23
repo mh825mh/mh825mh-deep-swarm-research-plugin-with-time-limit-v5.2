@@ -181,10 +181,27 @@ When Local Document Sources is enabled in settings, your indexed RAG libraries a
     // src/toolsProvider.ts
 
 implementation: async (
-  { topic, focusAreas, depthOverride, contentLimitOverride, sessionTimeoutMinutes },
-  { status, warn, signal },   // host-provided signal
+  args: {
+    topic: string;
+    focusAreas?: string[];
+    depthOverride?: "shallow" | "standard" | "deep" | "deeper" | "exhaustive";
+    contentLimitOverride?: number;
+    sessionTimeoutMinutes?: number;
+  },
+  { status, warn, signal },
 ) => {
+  const {
+    topic,
+    focusAreas,
+    depthOverride,
+    contentLimitOverride,
+    sessionTimeoutMinutes,
+  } = args;
+
   const cfg = readConfig(ctl);
+  const timeoutMinutes = sessionTimeoutMinutes ?? 15;
+  const maxMs = timeoutMinutes * 60_000;
+  const currentDateIso = new Date().toISOString();
 
   const researchCfg: ResearchConfig = {
     topic,
@@ -195,17 +212,12 @@ implementation: async (
     enableAIPlanning: cfg.enableAIPlanning,
     safeSearch: cfg.safeSearch,
     enableLocalSources: cfg.enableLocalSources,
+    maxSessionMs: maxMs,
   };
 
-  // Decide timeout in minutes
-  const timeoutMinutes =
-    sessionTimeoutMinutes ?? (cfg as any).maxSessionMinutes ?? 30;
-
-  // Build a session-level AbortController
   const sessionController = new AbortController();
   const sessionSignal = sessionController.signal;
 
-  // Bridge host cancellations into our controller
   if (signal.aborted) {
     sessionController.abort();
   } else {
@@ -218,8 +230,6 @@ implementation: async (
     );
   }
 
-  // Start wall-clock timer
-  const timeoutMs = timeoutMinutes * 60_000;
   const timeoutId = setTimeout(() => {
     if (!sessionSignal.aborted) {
       status(
@@ -227,17 +237,17 @@ implementation: async (
       );
       sessionController.abort();
     }
-  }, timeoutMs);
+  }, maxMs);
 
   try {
     const result = await runDeepResearch(
       researchCfg,
       status,
       warn,
-      sessionSignal,  // NOTE: use sessionSignal, not the original
+      sessionSignal,
     );
 
-   clearTimeout(timeoutId);
+    clearTimeout(timeoutId);
 
     return {
       topic,
@@ -266,13 +276,10 @@ implementation: async (
   } catch (err: unknown) {
     clearTimeout(timeoutId);
 
-    // Distinguish host cancel vs our timeout
     if (isAbortError(err)) {
       if (signal.aborted) {
-        // Host / user cancel
         return "Research cancelled by user.";
       }
-      // Our own time cap
       return `Research stopped after ${timeoutMinutes} minutes (session time limit reached).`;
     }
 

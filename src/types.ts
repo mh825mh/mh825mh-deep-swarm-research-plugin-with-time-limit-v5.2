@@ -221,6 +221,7 @@ export interface ResearchConfig {
   readonly enableLocalSources: boolean;
   readonly localLibraryIds?: ReadonlyArray<string>;
   readonly roleLibraryMap?: ReadonlyMap<string, ReadonlyArray<string>>;
+  readonly maxSessionMs?: number;
 }
 
 export interface ResearchResult {
