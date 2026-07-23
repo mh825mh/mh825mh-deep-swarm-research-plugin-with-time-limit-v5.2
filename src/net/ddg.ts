@@ -172,6 +172,7 @@ export async function searchDDG(
   safeSearch: "strict" | "moderate" | "off",
   signal: AbortSignal,
   limiter: DdgRateLimiter = sharedDdgLimiter,
+  timeRange: string = "all",
   page: number = 1,
 ): Promise<ReadonlyArray<SearchHit>> {
   const trimmed = trimQuery(query);
@@ -188,6 +189,7 @@ export async function searchDDG(
         maxResults,
         safeSearch,
         signal,
+		timeRange,
       );
       if (hits.length > 0) {
         console.log(`(HTML) Success: ${hits.length} results`);
@@ -204,6 +206,7 @@ export async function searchDDG(
       safeSearch,
       signal,
       offset,
+	  timeRange, 
     );
     if (hits.length > 0) {
       console.log(`(Lite) Success: ${hits.length} results`);
@@ -216,7 +219,7 @@ export async function searchDDG(
   
   try {
     console.log(`(Fallback) DDG failed, trying Brave Search for: "${trimmed}"`);
-    const braveHits = await searchBrave(trimmed, maxResults, signal, limiter);
+    const braveHits = await searchBrave(trimmed, maxResults, signal, limiter,timeRange);
     if (braveHits.length > 0) {
       console.log(`(Brave) Fallback success: ${braveHits.length} results`);
       return braveHits;
@@ -239,8 +242,8 @@ export async function searchDDG(
 }
 
 /**
- * Fetch multiple pages of results for a single query.
- */
+Fetch multiple pages of results for a single query.
+*/
 export async function searchDDGPaginated(
   query: string,
   maxResultsPerPage: number,
@@ -248,22 +251,24 @@ export async function searchDDGPaginated(
   safeSearch: "strict" | "moderate" | "off",
   signal: AbortSignal,
   limiter: DdgRateLimiter = sharedDdgLimiter,
+  timeRange: string = "all",
 ): Promise<ReadonlyArray<SearchHit>> {
   const allHits: SearchHit[] = [];
   const seen = new Set<string>();
-
   for (let p = 1; p <= pages; p++) {
     if (signal.aborted) break;
     if (p > 1 && globalThrottle.errorCount >= 3) break;
-
+    
     const hits = await searchDDG(
       query,
       maxResultsPerPage,
       safeSearch,
       signal,
       limiter,
+      timeRange,
       p,
     );
+    
     console.log(`(DDG) ${query} -> ${hits.length} results`);
     for (const h of hits) {
       if (!seen.has(h.url)) {
@@ -271,10 +276,8 @@ export async function searchDDGPaginated(
         allHits.push(h);
       }
     }
-
     if (hits.length < maxResultsPerPage * 0.5) break;
   }
-
   return allHits;
 }
 
@@ -284,14 +287,20 @@ async function tryLiteEndpoint(
   safeSearch: "strict" | "moderate" | "off",
   signal: AbortSignal,
   offset: number = 0,
+  timeRange: string = "all",
 ): Promise<ReadonlyArray<SearchHit>> {
   const url = "https://lite.duckduckgo.com/lite/";
-  
   let body = `q=${encodeURIComponent(query)}`;
   if (safeSearch === "strict") body += "&p=-1";
   if (safeSearch === "off") body += "&p=1";
   if (offset > 0) {
     body += `&s=${offset}&dc=${Math.floor(offset / maxResults) + 1}`;
+  }
+  
+  // Clean time filter application (no trailing spaces, proper &&)
+  const dfMap: Record<string, string> = { day: "d", week: "w", month: "m", year: "y" };
+  if (timeRange !== "all" && dfMap[timeRange]) {
+    body += `&df=${dfMap[timeRange]}`;
   }
 
   console.log(`(Lite) Fetching '${url}?${body}' (POST)`);
@@ -299,7 +308,6 @@ async function tryLiteEndpoint(
     ...buildDDGHeaders(),
     "Content-Type": "application/x-www-form-urlencoded",
   }, signal, body);
-  
   return parseLiteResults(html, maxResults);
 }
 
@@ -308,11 +316,19 @@ async function tryHtmlEndpoint(
   maxResults: number,
   safeSearch: "strict" | "moderate" | "off",
   signal: AbortSignal,
+  timeRange: string = "all",
 ): Promise<ReadonlyArray<SearchHit>> {
+  // 1. Declare 'url' FIRST so it can be used below
   const url = new URL("https://duckduckgo.com/html/");
   url.searchParams.set("q", query);
   if (safeSearch === "strict") url.searchParams.set("p", "-1");
   if (safeSearch === "off") url.searchParams.set("p", "1");
+
+  // 2. Apply time filter cleanly
+  const dfMap: Record<string, string> = { day: "d", week: "w", month: "m", year: "y" };
+  if (timeRange !== "all" && dfMap[timeRange]) {
+    url.searchParams.set("df", dfMap[timeRange]);
+  }
 
   console.log(`(HTML) Fetching '${url.toString()}'`);
   const html = await fetchInsecure(url.toString(), buildDDGHeaders(), signal);
@@ -327,58 +343,32 @@ function parseLiteResults(
   const doc = dom.window.document;
   const hits: SearchHit[] = [];
   const seen = new Set<string>();
-
   let resultLinks = doc.querySelectorAll("a.result-link");
-  if (resultLinks.length === 0) {
-    resultLinks = doc.querySelectorAll(".result-link");
-  }
-  if (resultLinks.length === 0) {
-    resultLinks = doc.querySelectorAll(".links_main a");
-  }
-  if (resultLinks.length === 0) {
-    resultLinks = doc.querySelectorAll("a[href*='uddg=']");
-  }
-
+  if (resultLinks.length === 0) resultLinks = doc.querySelectorAll(".result-link");
+  if (resultLinks.length === 0) resultLinks = doc.querySelectorAll(".links_main a");
+  if (resultLinks.length === 0) resultLinks = doc.querySelectorAll("a[href*='uddg=']");
+  
   for (const link of Array.from(resultLinks)) {
     if (hits.length >= maxResults) break;
-
     let rawUrl = (link as HTMLAnchorElement).href || "";
     const title = link.textContent?.trim() || "";
-
     const row = link.closest("tr");
-    const snippetEl =
-      row?.nextElementSibling?.querySelector(".result-snippet") ||
-      row?.querySelector(".result-snippet");
-
-    const snippet = snippetEl
-      ? turndownService.turndown(snippetEl.innerHTML).replace(/\s+/g, " ").trim()
-      : title;
-
+    const snippetEl = row?.nextElementSibling?.querySelector(".result-snippet") || row?.querySelector(".result-snippet");
+    const snippet = snippetEl ? turndownService.turndown(snippetEl.innerHTML).replace(/\s+/g, " ").trim() : title;
+    
     const uddgMatch = /[?&]uddg=([^&]+)/.exec(rawUrl);
     if (uddgMatch) {
-      try {
-        rawUrl = decodeURIComponent(uddgMatch[1]);
-      } catch {
-        /* ignore decode errors */
-      }
+      try { rawUrl = decodeURIComponent(uddgMatch[1]); } catch { /* ignore */ }
     } else {
-      try {
-        rawUrl = decodeURIComponent(rawUrl);
-      } catch {
-        /* ignore */
-      }
+      try { rawUrl = decodeURIComponent(rawUrl); } catch { /* ignore */ }
     }
-
-    if (!rawUrl.startsWith("http") || DDG_INTERNAL.test(rawUrl)) {
-      continue;
-    }
-
+    
+    if (!rawUrl.startsWith("http") || DDG_INTERNAL.test(rawUrl)) continue;
     if (seen.has(rawUrl)) continue;
+    
     seen.add(rawUrl);
-
     hits.push({ url: rawUrl, title, snippet });
   }
-
   console.log(`(Lite) ${hits.length} parsed (html length: ${html.length})`);
   return hits;
 }
@@ -391,52 +381,33 @@ function parseHtmlResults(
   const doc = dom.window.document;
   const hits: SearchHit[] = [];
   const seen = new Set<string>();
-
   const results = doc.querySelectorAll(".result");
-
+  
   for (const res of Array.from(results)) {
     if (hits.length >= maxResults) break;
-
     const link = res.querySelector(".result__a") as HTMLAnchorElement;
     if (!link) continue;
-
+    
     let rawUrl = link.href || "";
     const title = link.textContent?.trim() || "";
-
     const snippetEl = res.querySelector(".result__snippet");
-    const snippet = snippetEl
-      ? turndownService.turndown(snippetEl.innerHTML).replace(/\s+/g, " ").trim()
-      : title;
-
+    const snippet = snippetEl ? turndownService.turndown(snippetEl.innerHTML).replace(/\s+/g, " ").trim() : title;
+    
     const uddgMatch = /[?&]uddg=([^&]+)/.exec(rawUrl);
     if (uddgMatch) {
-      try {
-        rawUrl = decodeURIComponent(uddgMatch[1]);
-      } catch {
-        /* ignore */
-      }
+      try { rawUrl = decodeURIComponent(uddgMatch[1]); } catch { /* ignore */ }
     } else {
-      try {
-        rawUrl = decodeURIComponent(rawUrl);
-      } catch {
-        /* ignore */
-      }
+      try { rawUrl = decodeURIComponent(rawUrl); } catch { /* ignore */ }
     }
-
-    if (!rawUrl.startsWith("http") || DDG_INTERNAL.test(rawUrl)) {
-      continue;
-    }
-
+    
+    if (!rawUrl.startsWith("http") || DDG_INTERNAL.test(rawUrl)) continue;
     if (seen.has(rawUrl)) continue;
+    
     seen.add(rawUrl);
-
     hits.push({ url: rawUrl, title, snippet });
   }
-
-  if (hits.length === 0) {
-    return parseLegacy(html, maxResults);
-  }
-
+  
+  if (hits.length === 0) return parseLegacy(html, maxResults);
   return hits;
 }
 
@@ -448,29 +419,23 @@ function parseLegacy(
   const doc = dom.window.document;
   const hits: SearchHit[] = [];
   const seen = new Set<string>();
-
   const links = doc.querySelectorAll("a[href]");
-
+  
   for (const link of Array.from(links)) {
     if (hits.length >= maxResults) break;
-
     const href = (link as HTMLAnchorElement).href;
     if (!href) continue;
-
     try {
       const rawUrl = decodeURIComponent(href);
       const title = link.textContent?.trim() || "";
-
       if (DDG_INTERNAL.test(rawUrl)) continue;
       if (!rawUrl.startsWith("http")) continue;
       if (seen.has(rawUrl)) continue;
-
       seen.add(rawUrl);
       hits.push({ url: rawUrl, title, snippet: title });
     } catch {
       continue;
     }
   }
-
   return hits;
 }

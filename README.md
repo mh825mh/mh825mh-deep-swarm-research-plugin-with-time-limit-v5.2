@@ -9,8 +9,28 @@ v2 - 	Added session timeout support to the Research tool so long-running deep re
 v3 - 	Added failure memory to the swarm crawl state so failed URLs and repeatedly failing hosts are tracked and can be skipped on later fetch attempts.
 		Updated worker fetch flow to support avoiding blocked or unstable sources instead of retrying the same bad URLs repeatedly.
 		Fixed MutableCrawlState integration in the orchestrator so shared crawl state can carry both normal crawl tracking and failure tracking across workers.
+v4 - 	1. Core Added Feature: Native Engine Time Filtering
+		Previously, the swarm had to fetch all available results and rely on the LLM or local parsing to guess if a source was recent. Now, the plugin injects native time-range parameters directly into the search engine URLs. 
+		This guarantees that the search engines only return fresh results, saving crawl budget and network bandwidth.
 
+		DuckDuckGo (ddg.ts): Added native time filtering to both tryHtmlEndpoint and tryLiteEndpoint using DDG's df (date filter) parameter (e.g., df=d for past day, df=w for past week, df=m, df=y).
+		Brave Search (search-engines.ts): Added time filtering to searchBrave using Brave's qdr parameter (e.g., qdr:d, qdr:w).
+		SearXNG (search-engines.ts): Added time filtering to searchSearXNG using the time_range URL parameter.
+		Helper Mapping (search-engines.ts): Added the getTimeFilterParams utility function to cleanly map the user's UI selection (day, week, month, year) to the specific query strings required by different engines.
 
+		 2. Architecture Improvement: End-to-End State Propagation
+		Improved the data flow so the time constraint survives from the user interface down to the lowest-level network requests.
+
+		Worker Layer (worker.ts): Fixed the function calls for searchDDG, searchDDGPaginated, and multiEngineSearch. The worker now correctly extracts task.timeRange and passes it down the chain, replacing the previously broken TypeScript syntax 
+		(where type definitions were accidentally pasted inside function calls).
+		Fallback Consistency (ddg.ts): Improved the fallback mechanism. If DuckDuckGo fails and the swarm falls back to Brave Search, the timeRange parameter is now correctly passed to searchBrave, ensuring the time constraint is not lost during engine switching.
+		3. Code Robustness & Bug Fixes
+		Significant improvements were made to the underlying network scraping logic to prevent silent failures and compilation errors
+		Summary of Impact
+
+		For the User: The plugin now features a UI dropdown to filter searches by "Past 24h, Week, Month, Year", making it highly effective for breaking news or rapidly evolving research topics.
+		For the Swarm: By filtering at the search engine level rather than the parsing level, the swarm avoids wasting its strict pageBudget and timeLimit on crawling outdated URLs.
+		For the Codebase: The removal of syntax errors, duplicate definitions, and hidden string spaces makes the network layer significantly more stable and compliant with TypeScript strict-mode compilation.
 ---
 
 ## Tools

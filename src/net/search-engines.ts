@@ -14,12 +14,15 @@ export async function searchBrave(
   maxResults: number,
   signal: AbortSignal,
   limiter?: DdgRateLimiter,
+  timeRange: string = "all",
 ): Promise<ReadonlyArray<SearchHit>> {
   if (limiter) await limiter.acquire();
   if (signal.aborted) throw new DOMException("Aborted", "AbortError");
 
   try {
-    const url = `https://search.brave.com/search?q=${encodeURIComponent(query)}&source=web&_rr=1`;
+    const qdrMap: Record<string, string> = { day: "qdr:d", week: "qdr:w", month: "qdr:m", year: "qdr:y" };
+    const timeParam = timeRange !== "all" ? `&${qdrMap[timeRange] || "qdr:y"}` : "";
+	const url = `https://search.brave.com/search?q=${encodeURIComponent(query)}&source=web${timeParam}`;
     console.log(`(Brave) Fetching '${url}'`);
     const res = await fetch(url, {
       signal,
@@ -36,6 +39,33 @@ export async function searchBrave(
     return parseBraveResults(html, maxResults);
   } catch {
     return [];
+  }
+}
+
+function getTimeFilterParams(timeRange: string, engine: SearchEngine): { querySuffix: string; urlParam: string } {
+  if (timeRange === "all") return { querySuffix: "", urlParam: "" };
+
+  switch (engine) {
+    case "brave": {
+      // Brave supports qdr:d (day), qdr:w (week), qdr:m (month), qdr:y (year)
+      const braveMap: Record<string, string> = { day: "qdr:d", week: "qdr:w", month: "qdr:m", year: "qdr:y" };
+      return { querySuffix: ` ${braveMap[timeRange] || ""}`, urlParam: "" };
+    }
+    case "searxng": {
+      // SearXNG supports time_range URL parameter
+      const searxngMap: Record<string, string> = { day: "day", week: "week", month: "month", year: "year" };
+      return { querySuffix: "", urlParam: searxngMap[timeRange] ? `&time_range=${searxngMap[timeRange]}` : "" };
+    }
+    case "scholar": {
+      // Google Scholar uses as_ylo (year low) and as_yhi (year high)
+      const currentYear = new Date().getFullYear();
+      const yearMap: Record<string, string> = { 
+        day: `${currentYear}`, week: `${currentYear}`, month: `${currentYear}`, year: `${currentYear - 1}` 
+      };
+      return { querySuffix: "", urlParam: `&as_ylo=${yearMap[timeRange] || currentYear}&as_yhi=${currentYear}` };
+    }
+    default:
+      return { querySuffix: "", urlParam: "" };
   }
 }
 
@@ -155,6 +185,7 @@ export async function searchSearXNG(
   maxResults: number,
   signal: AbortSignal,
   limiter?: DdgRateLimiter,
+  timeRange: string = "all",
 ): Promise<ReadonlyArray<SearchHit>> {
   if (limiter) await limiter.acquire();
   if (signal.aborted) throw new DOMException("Aborted", "AbortError");
@@ -162,7 +193,8 @@ export async function searchSearXNG(
   for (const instance of SEARXNG_INSTANCES) {
     if (signal.aborted) break;
     try {
-      const url = `${instance}/search?q=${encodeURIComponent(query)}&format=json&categories=general&language=en`;
+      const timeParam = timeRange !== "all" ? `&time_range=${timeRange}` : "";
+      const url = `${instance}/search?q=${encodeURIComponent(query)}&format=json&categories=general&language=en${timeParam}`;
       const res = await fetch(url, {
         signal,
         headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
@@ -260,6 +292,7 @@ export async function multiEngineSearch(
   engines: ReadonlyArray<SearchEngine>,
   signal: AbortSignal,
   getLimiter: () => DdgRateLimiter,
+  timeRange: string = "all",
 ): Promise<ReadonlyArray<SearchHit>> {
   const engineFns: Record<
     SearchEngine,
@@ -268,6 +301,7 @@ export async function multiEngineSearch(
       max: number,
       s: AbortSignal,
       l: DdgRateLimiter,
+	  tr: string, 
     ) => Promise<ReadonlyArray<SearchHit>>
   > = {
     ddg: async () => [],
@@ -282,8 +316,8 @@ export async function multiEngineSearch(
     .map((engine) => {
       const fn = engineFns[engine];
       const limiter = getLimiter();
-      return fn(query, maxResultsPerEngine, signal, limiter).catch(
-        () => [] as SearchHit[],
+	  return fn(query, maxResultsPerEngine, signal, limiter, timeRange).catch(
+         () => [] as SearchHit[],
       );
     });
 

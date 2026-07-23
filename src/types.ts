@@ -100,6 +100,7 @@ export interface SwarmTask {
   readonly enableLocalSources: boolean;
   readonly localLibraryIds?: ReadonlyArray<string>;
   readonly roleLibraryMap?: ReadonlyMap<string, ReadonlyArray<string>>;
+  readonly timeRange?: "all" | "year" | "month" | "week" | "day";
 }
 
 /** Result produced by a single swarm worker. */
@@ -222,6 +223,7 @@ export interface ResearchConfig {
   readonly localLibraryIds?: ReadonlyArray<string>;
   readonly roleLibraryMap?: ReadonlyMap<string, ReadonlyArray<string>>;
   readonly maxSessionMs?: number;
+  readonly timeRange?: "all" | "year" | "month" | "week" | "day";
 }
 
 export interface ResearchResult {

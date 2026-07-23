@@ -140,7 +140,8 @@ export async function runWorker(
           task.safeSearch,
           signal,
           limiter,
-        );
+		  task.timeRange,
+		  );
       } else {
         ddgHits = await searchDDG(
           query,
@@ -148,6 +149,7 @@ export async function runWorker(
           task.safeSearch,
           signal,
           limiter,
+		  task.timeRange ?? "all",
         );
       }
       for (const h of ddgHits) allHits.push({ ...h, query });
@@ -176,6 +178,7 @@ export async function runWorker(
             task.safeSearch,
             signal,
             limiter,
+			task.timeRange ?? "all"
           );
           if (mutHits.length > ddgHits.length) {
             for (const h of mutHits) allHits.push({ ...h, query: mutated });
@@ -201,6 +204,7 @@ export async function runWorker(
           task.extraEngines as ReadonlyArray<SearchEngine>,
           signal,
           () => limiter,
+		  task.timeRange, 
         );
         for (const h of extraHits) allHits.push({ ...h, query });
         if (extraHits.length > 0) {

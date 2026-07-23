@@ -2,6 +2,22 @@ import { createConfigSchematics } from "@lmstudio/sdk";
 
 export const configSchematics = createConfigSchematics()
   .field(
+  "timeRange",
+  "select",
+  {
+    displayName: "Search Time Range",
+    subtitle: "Filter search results by publication date to ensure information freshness.",
+    options: [
+      { value: "all", displayName: "All time (default)" },
+      { value: "year", displayName: "Past year" },
+      { value: "month", displayName: "Past month" },
+      { value: "week", displayName: "Past week" },
+      { value: "day", displayName: "Past 24 hours" },
+    ],
+  },
+  "all", // Default value
+)
+  .field(
     "researchDepth",
     "select",
     {
