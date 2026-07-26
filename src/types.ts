@@ -1,16 +1,9 @@
-/**
- * @file types.ts
- * Shared TypeScript types for the entire plugin.
- */
-
-/** A raw search result before scoring. */
 export interface SearchHit {
   readonly title: string;
   readonly url: string;
   readonly snippet: string;
 }
 
-/** A fully extracted web page. */
 export interface ExtractedPage {
   readonly url: string;
   readonly finalUrl: string;
@@ -62,9 +55,6 @@ export type WorkerRole =
   | "primary"
   | "comparative";
 
-/**
- * The orchestrator generates custom worker specs tailored to each topic.
- */
 export interface DynamicWorkerSpec {
   readonly role: WorkerRole;
   readonly label: string;
@@ -74,7 +64,6 @@ export interface DynamicWorkerSpec {
   readonly preferredTiers?: ReadonlyArray<SourceTier>;
 }
 
-/** A single unit of parallel work assigned to one swarm worker. */
 export interface SwarmTask {
   readonly id: string;
   readonly role: WorkerRole;
@@ -103,7 +92,6 @@ export interface SwarmTask {
   readonly timeRange?: "all" | "year" | "month" | "week" | "day";
 }
 
-/** Result produced by a single swarm worker. */
 export interface WorkerResult {
   readonly taskId: string;
   readonly role: WorkerRole;
@@ -113,7 +101,6 @@ export interface WorkerResult {
   readonly errors: ReadonlyArray<string>;
 }
 
-/** A crawled and extracted page, enriched with research metadata. */
 export interface CrawledSource {
   readonly url: string;
   readonly finalUrl: string;
@@ -170,7 +157,6 @@ export interface QueryPlan {
   readonly dynamicSpecs?: ReadonlyArray<DynamicWorkerSpec>;
 }
 
-/** Adaptive gap-fill plan with targeted worker role per gap. */
 export interface AdaptiveGapPlan {
   readonly role: WorkerRole;
   readonly label: string;
@@ -178,6 +164,8 @@ export interface AdaptiveGapPlan {
   readonly followLinks: boolean;
   readonly preferredTiers?: ReadonlyArray<SourceTier>;
 }
+
+export type SourceOrigin = "web" | "local";
 
 export interface ReportSource {
   readonly index: number;
@@ -208,8 +196,6 @@ export interface CompiledReport {
   readonly aiSynthesis?: string;
   readonly contradictions: ReadonlyArray<ContradictionEntry>;
 }
-
-export type SourceOrigin = "web" | "local";
 
 export interface ResearchConfig {
   readonly topic: string;

@@ -1,9 +1,3 @@
-/**
- * @file planning/dimensions.ts
- * The 12 research dimensions that constitute comprehensive coverage.
- * Coverage detection requires minimum keyword density and context length.
- */
-
 import { ResearchDimension } from "../types";
 import {
   DIMENSION_COVERAGE_MIN_HITS,
@@ -46,8 +40,8 @@ export const DIMENSIONS: ReadonlyArray<ResearchDimension> = [
     queries: (t) => [
       `how does ${t} work`,
       `${t} mechanism process explained`,
-      `${t} technical architecture`,
       `${t} step by step process`,
+      `${t} breakdown analysis`,
     ],
   },
   {
@@ -67,6 +61,7 @@ export const DIMENSIONS: ReadonlyArray<ResearchDimension> = [
       `${t} history origin development`,
       `${t} timeline evolution`,
       `who invented ${t}`,
+      `${t} historical background`,
     ],
   },
   {
@@ -189,6 +184,7 @@ export const DIMENSIONS: ReadonlyArray<ResearchDimension> = [
       `${t} expert opinion analysis`,
       `${t} leading researchers views`,
       `${t} industry expert perspectives`,
+      `${t} analyst commentary`,
     ],
   },
   {
@@ -209,6 +205,7 @@ export const DIMENSIONS: ReadonlyArray<ResearchDimension> = [
       `${t} future trends predictions`,
       `${t} forecast outlook 2026 2027`,
       `${t} emerging trends next generation`,
+      `${t} what comes next`,
     ],
   },
   {
@@ -228,6 +225,7 @@ export const DIMENSIONS: ReadonlyArray<ResearchDimension> = [
       `${t} criticism controversy ethical debate`,
       `${t} opposition arguments against`,
       `${t} ethical concerns criticism`,
+      `${t} public debate`,
     ],
   },
   {
@@ -248,20 +246,18 @@ export const DIMENSIONS: ReadonlyArray<ResearchDimension> = [
       `${t} economic impact market size cost`,
       `${t} market growth revenue forecast`,
       `${t} pricing economics ROI`,
+      `${t} financial impact analysis`,
     ],
   },
 ];
 
-/** Returns dimension IDs with meaningful coverage based on hit count and context length. */
 export function detectCoveredDimensions(
   texts: ReadonlyArray<string>,
 ): ReadonlyArray<string> {
   const combined = texts.join(" ").toLowerCase();
-
   return DIMENSIONS.filter((dim) => {
     let totalHits = 0;
     let totalChars = 0;
-
     for (const kw of dim.keywords) {
       let idx = 0;
       while ((idx = combined.indexOf(kw, idx)) !== -1) {
@@ -272,7 +268,6 @@ export function detectCoveredDimensions(
         idx += kw.length;
       }
     }
-
     return (
       totalHits >= DIMENSION_COVERAGE_MIN_HITS &&
       totalChars >= DIMENSION_COVERAGE_MIN_CHARS
@@ -280,9 +275,6 @@ export function detectCoveredDimensions(
   }).map((dim) => dim.id);
 }
 
-/**
- * Returns the dimensions NOT yet covered by the collected sources.
- */
 export function detectGaps(
   coveredIds: ReadonlyArray<string>,
 ): ReadonlyArray<ResearchDimension> {
@@ -290,9 +282,6 @@ export function detectGaps(
   return DIMENSIONS.filter((d) => !coveredSet.has(d.id));
 }
 
-/**
- * Generates gap-filling queries for a given list of uncovered dimensions.
- */
 export function gapFillQueries(
   topic: string,
   gaps: ReadonlyArray<ResearchDimension>,

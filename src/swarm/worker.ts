@@ -1,13 +1,3 @@
-/**
- * @file swarm/worker.ts
- * A single swarm worker with:
- * - Multi-engine search (DDG + Brave + Scholar + SearXNG + Mojeek)
- * - Query mutation: auto-rephrase when results are sparse
- * - Recursive link crawling (configurable depth 1-3)
- * - Cross-worker discovery sharing via SharedCrawlState
- * - All limits read from SwarmTask (depth-profile overrides)
- */
-
 import {
   searchDDG,
   searchDDGPaginated,
@@ -15,18 +5,10 @@ import {
   sharedDdgLimiter,
 } from "../net/ddg";
 import { multiEngineSearch, SearchEngine } from "../net/search-engines";
-import { fetchPage } from "../net/http";
-import {
-  extractPage,
-  contentFingerprint,
-  computeRelevance,
-} from "../net/extractor";
+import { fetchPage, sleep } from "../net/http";
+import { extractPage, contentFingerprint, computeRelevance } from "../net/extractor";
 import { isPdfUrl, isPdfContentType, extractPdf } from "../net/pdf-extractor";
-import {
-  scoreCandidate,
-  rankCandidates,
-  scoreOutlinks,
-} from "../scoring/authority";
+import { scoreCandidate, rankCandidates, scoreOutlinks } from "../scoring/authority";
 import {
   SwarmTask,
   WorkerResult,
@@ -35,43 +17,88 @@ import {
   SourceTier,
   StatusFn,
   WarnFn,
+  SearchHit, // 👈 ADDED THIS
 } from "../types";
 import { harvestLocalSources } from "../local/search";
-import {
-  BATCH_INTER_FETCH_DELAY_MS,
-  MIN_USEFUL_WORD_COUNT,
-} from "../constants";
-import { sleep } from "../net/http";
+import { BATCH_INTER_FETCH_DELAY_MS, MIN_USEFUL_WORD_COUNT } from "../constants";
+import { normalizeUrl } from "./visited-cache";
+
+export interface CrawlMetrics {
+  ddgQueries: number;
+  ddgHits: number;
+  mutatedQueriesTried: number;
+  mutationAccepted: number;
+  mutationHits: number;
+  extraEngineQueries: number;
+  extraEngineHits: number;
+  rawHits: number;
+  dedupedHits: number;
+  rankedCandidates: number;
+  fetchCandidates: number;
+  fetchAttempts: number;
+  fetchFailures: number;
+  acceptedSources: number;
+  skippedLowWordCount: number;
+  skippedOffTopic: number;
+  skippedVeryOffTopic: number;
+  skippedDuplicateContent: number;
+  skippedVisited: number;
+  skippedDomainCap: number;
+  skippedAvoided: number;
+  skippedBlacklisted: number;
+  cacheChecks: number;
+  cacheHits: number;
+  cacheAccepted: number;
+  cacheRejectedDuplicate: number;
+  cacheRejectedOffTopic: number;
+  cacheRejectedLowWordCount: number;
+  cacheWrites: number;
+  followedLinks: number;
+  crossWorkerDiscoveriesUsed: number;
+  localSourcesAccepted: number;
+}
 
 export interface SharedCrawlState {
   readonly visitedUrls: ReadonlySet<string>;
   readonly contentHashes: ReadonlySet<string>;
   readonly domainCounts: ReadonlyMap<string, number>;
+  readonly domainFailures: ReadonlyMap<string, number>;
   addVisited(url: string): void;
   addHash(hash: string): void;
   incrementDomain(url: string): void;
   domainCount(url: string): number;
   noteFailure(url: string, reason: string): void;
+  noteDomainFailure(url: string): void;
+  isDomainBlacklisted(url: string): boolean;
   shouldAvoidUrl(url: string): boolean;
   pushDiscovery(url: string, title: string, fromWorker: string): void;
-  drainDiscoveries(
-    limit: number,
-  ): ReadonlyArray<{ url: string; title: string }>;
+  drainDiscoveries(limit: number): ReadonlyArray<{ url: string; title: string }>;
+  isRecentlyVisited(url: string): boolean;
+  getCachedSource(url: string): CrawledSource | null;
+  markVisitedPersistent(source: CrawledSource): void;
+  getMetricsSnapshot(): Readonly<CrawlMetrics>;
+  mergeMetrics(delta: Partial<CrawlMetrics>): void;
 }
 
 const MUTATION_STRATEGIES: ReadonlyArray<(q: string) => string> = [
   (q) => `"${q}"`,
   (q) => `${q} explained`,
-  (q) => `${q} research 2024-2026+`,
-  (q) => q.split(" ").slice(0, 4).join(" "),
   (q) => `${q} guide overview`,
-  (q) => q.replace(/\b(how|what|why|when)\b/gi, "").trim(),
+  (q) => `${q} research`,
+  (q) => q.split(" ").slice(0, 5).join(" "),
+  (q) => q.replace(/\b(how|what|why|when)\b/gi, " ").trim(),
 ];
 
-function mutateQuery(query: string, attempt: number): string | null {
-  if (attempt >= MUTATION_STRATEGIES.length) return null;
-  const mutated = MUTATION_STRATEGIES[attempt](query);
-  return mutated && mutated !== query && mutated.length > 3 ? mutated : null;
+type SearchHitLike = {
+  url: string;
+  title: string;
+  snippet: string;
+  query: string;
+};
+
+function isRateLimitError(msg: string): boolean {
+  const lower = msg.toLowerCase();
+  return lower.includes("429") || lower.includes("too many requests") || lower.includes("rate limit");
 }
 
 export async function runWorker(
@@ -86,13 +113,45 @@ export async function runWorker(
   const sources: CrawledSource[] = [];
   const errors: string[] = [];
   const queriesExecuted: string[] = [];
-
   const roleTag = `[${task.label}]`;
-  status(
-    `${roleTag} Starting - ${task.queries.length} queries, budget: ${task.pageBudget} pages`);
+  const metrics: CrawlMetrics = {
+    ddgQueries: 0,
+    ddgHits: 0,
+    mutatedQueriesTried: 0,
+    mutationAccepted: 0,
+    mutationHits: 0,
+    extraEngineQueries: 0,
+    extraEngineHits: 0,
+    rawHits: 0,
+    dedupedHits: 0,
+    rankedCandidates: 0,
+    fetchCandidates: 0,
+    fetchAttempts: 0,
+    fetchFailures: 0,
+    acceptedSources: 0,
+    skippedLowWordCount: 0,
+    skippedOffTopic: 0,
+    skippedVeryOffTopic: 0,
+    skippedDuplicateContent: 0,
+    skippedVisited: 0,
+    skippedDomainCap: 0,
+    skippedAvoided: 0,
+    skippedBlacklisted: 0,
+    cacheChecks: 0,
+    cacheHits: 0,
+    cacheAccepted: 0,
+    cacheRejectedDuplicate: 0,
+    cacheRejectedOffTopic: 0,
+    cacheRejectedLowWordCount: 0,
+    cacheWrites: 0,
+    followedLinks: 0,
+    crossWorkerDiscoveriesUsed: 0,
+    localSourcesAccepted: 0,
+  };
+
+  status(`${roleTag} Starting - ${task.queries.length} queries, budget=${task.pageBudget}, links=${task.followLinks ? "on" : "off"}`);
 
   if (task.enableLocalSources) {
-    console.log("Local sources:", task.localLibraryIds);
     const localBudget = Math.max(2, Math.ceil(task.pageBudget * 0.3));
     const localSources = harvestLocalSources(
       task.queries,
@@ -103,34 +162,24 @@ export async function runWorker(
       task.localLibraryIds,
       task.roleLibraryMap,
     );
-
     if (localSources.length > 0) {
       for (const src of localSources) {
         state.addVisited(src.url);
-        const fp = contentFingerprint(src.text);
-        state.addHash(fp);
+        state.addHash(contentFingerprint(src.text));
         sources.push(src);
       }
-      console.log(`${roleTag} Local sources: ${localSources.length} chunks from document collections`)
-      status(
-        `${roleTag} Local sources: ${localSources.length} chunks from document collections`,
-      );
+      status(`${roleTag} Local sources: ${localSources.length} chunks from document collections`);
     }
   }
 
-  const allHits: Array<{
-    url: string;
-    title: string;
-    snippet: string;
-    query: string;
-  }> = [];
+  const allHits: SearchHitLike[] = [];
+  let hitRateLimit = false;
 
   for (const query of task.queries) {
     if (signal.aborted) break;
-
-    let ddgHits: ReadonlyArray<import("../types").SearchHit> = [];
-    console.log(`(${roleTag}) DDG query: "${query}" (pages: ${task.searchPages})`);
-
+    let ddgHits: ReadonlyArray<{ url: string; title: string; snippet: string }> = [];
+    let effectiveHitCount = 0;
+    metrics.ddgQueries++;
     try {
       if (task.searchPages > 1) {
         ddgHits = await searchDDGPaginated(
@@ -140,8 +189,8 @@ export async function runWorker(
           task.safeSearch,
           signal,
           limiter,
-		  task.timeRange,
-		  );
+          task.timeRange ?? "all",
+        );
       } else {
         ddgHits = await searchDDG(
           query,
@@ -149,28 +198,49 @@ export async function runWorker(
           task.safeSearch,
           signal,
           limiter,
-		  task.timeRange ?? "all",
+          task.timeRange ?? "all",
         );
       }
-      for (const h of ddgHits) allHits.push({ ...h, query });
+      effectiveHitCount = ddgHits.length;
+      for (const h of ddgHits) {
+        allHits.push({ ...h, query });
+      }
       queriesExecuted.push(query);
-      console.log(`(${roleTag}) DDG: "${query}" -> ${ddgHits.length} results`);
-      status(
-        `${roleTag} DDG: "${query}" -> ${ddgHits.length} results${task.searchPages > 1 ? ` (${task.searchPages}pg)` : ""}`,
-      );
+      status(`${roleTag} DDG: "${query}" -> ${ddgHits.length} results${task.searchPages > 1 ? ` (${task.searchPages}pg)` : ""}`);
     } catch (err: unknown) {
       if (isAbortError(err)) break;
-      console.warn(`(${roleTag}) DDG failed: "${query}" - ${errorMessage(err)}`);
-      warn(`(${roleTag}) DDG failed: "${query}" - ${errorMessage(err)}`);
-      errors.push(`ddg:"${query}": ${errorMessage(err)}`);
+      const msg = errorMessage(err);
+      if (isRateLimitError(msg)) {
+        hitRateLimit = true;
+        warn(`${roleTag} RATE LIMIT (429) DETECTED! Pausing worker for 20s...`);
+        await sleep(20000);
+      } else {
+        warn(`${roleTag} DDG failed: "${query}" - ${msg}`);
+      }
+      errors.push(`ddg:"${query}": ${msg}`);
     }
 
-    if (ddgHits.length < task.queryMutationThreshold && !signal.aborted) {
-      console.log(`(${roleTag}) DDG mutation: "${query}"`);
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const mutated = mutateQuery(query, attempt);
-        if (!mutated) break;
-        console.log(`(${roleTag}) DDG mutation attempt ${attempt}: "${mutated}"`);
+    if (ddgHits.length === 0 && !signal.aborted && !hitRateLimit) {
+      warn(`${roleTag} SILENT BLOCK DETECTED (0 hits)! DDG is likely serving CAPTCHAs. Pausing worker for 20s...`);
+      hitRateLimit = true;
+      await sleep(20000);
+    }
+
+    if (ddgHits.length < task.queryMutationThreshold && !signal.aborted && !hitRateLimit) {
+      const contextSnippets = allHits
+        .filter((h) => h.query === query)
+        .slice(0, 3)
+        .map((h) => h.snippet);
+      const llmMutated = await getLLMQueryMutation(query, contextSnippets, signal);
+      const mutationsToTry = [
+        llmMutated,
+        ...MUTATION_STRATEGIES.map((s) => s(query)),
+      ].filter((m): m is string => !!m && m !== query);
+      let bestMutation: { query: string; hits: ReadonlyArray<SearchHit> } | null = null;
+      const baseline = mutationQuality(ddgHits);
+      for (const mutated of mutationsToTry) {
+        if (signal.aborted) break;
+        metrics.mutatedQueriesTried++;
         try {
           const mutHits = await searchDDG(
             mutated,
@@ -178,25 +248,47 @@ export async function runWorker(
             task.safeSearch,
             signal,
             limiter,
-			task.timeRange ?? "all"
+            task.timeRange ?? "all",
           );
-          if (mutHits.length > ddgHits.length) {
-            for (const h of mutHits) allHits.push({ ...h, query: mutated });
-            queriesExecuted.push(mutated);
-            status(
-              `${roleTag} Mutated: "${mutated}" -> ${mutHits.length} results`,
-            );
+          if (mutationQuality(mutHits) > baseline) {
+            if (!bestMutation || mutationQuality(mutHits) > mutationQuality(bestMutation.hits)) {
+              bestMutation = { query: mutated, hits: mutHits };
+            }
+          }
+        } catch (err) {
+          const msg = errorMessage(err);
+          if (isRateLimitError(msg)) {
+            hitRateLimit = true;
+            warn(`${roleTag} Mutation RATE LIMIT (429)! Pausing for 15s...`);
+            await sleep(15000);
             break;
           }
-        } catch {
-          break;
+          warn(`${roleTag} Mutation failed: "${mutated}" - ${msg}`);
         }
+      }
+      if (bestMutation) {
+        for (const h of bestMutation.hits) {
+          allHits.push({ ...h, query: bestMutation.query });
+        }
+        queriesExecuted.push(bestMutation.query);
+        effectiveHitCount = Math.max(effectiveHitCount, bestMutation.hits.length);
+        status(`${roleTag} Mutation accepted: "${bestMutation.query.slice(0, 40)}..." -> ${bestMutation.hits.length} results`);
       }
     }
 
-    if (task.extraEngines.length > 0 && !signal.aborted) {
-      console.log(`(${roleTag}) Extra engines: ${task.extraEngines.join("+")}`);
-      console.log(`(${roleTag}) Extra engines query: "${query}" (pages: ${task.searchPages})`);
+    const shouldUseExtraEngines =
+      task.extraEngines.length > 0 &&
+      !signal.aborted &&
+      !hitRateLimit &&
+      (
+        effectiveHitCount < Math.ceil(task.searchResultsPerQuery * 0.6) ||
+        task.role === "academic" ||
+        task.role === "primary" ||
+        task.role === "regulatory"
+      );
+
+    if (shouldUseExtraEngines) {
+      metrics.extraEngineQueries++;
       try {
         const extraHits = await multiEngineSearch(
           query,
@@ -204,21 +296,24 @@ export async function runWorker(
           task.extraEngines as ReadonlyArray<SearchEngine>,
           signal,
           () => limiter,
-		  task.timeRange, 
+          task.timeRange ?? "all",
         );
-        for (const h of extraHits) allHits.push({ ...h, query });
+        for (const h of extraHits) {
+          allHits.push({ ...h, query });
+        }
         if (extraHits.length > 0) {
-          status(
-            `${roleTag} -> ${extraHits.length} extra results`,
-          );
+          status(`${roleTag} -> ${extraHits.length} extra results`);
         }
       } catch {
-        /* non-fatal */
+        // non-fatal
       }
     }
   }
 
+  metrics.rawHits = allHits.length;
   if (signal.aborted || allHits.length === 0) {
+    state.mergeMetrics(metrics);
+    status(`${roleTag} Summary raw_hits=0 accepted=0 cache_hits=0`);
     return {
       taskId: task.id,
       role: task.role,
@@ -230,20 +325,17 @@ export async function runWorker(
   }
 
   const deduped = deduplicateByUrl(allHits);
+  metrics.dedupedHits = deduped.length;
   const scored = deduped.map((h) => scoreCandidate(h, h.query));
   const filtered = task.preferredTiers
     ? scored.filter((c) => task.preferredTiers!.includes(c.tier))
     : scored;
-
   const poolSize = task.pageBudget * task.candidatePoolMultiplier;
-  const candidates = rankCandidates(
-    filtered.length > 0 ? filtered : scored,
-    poolSize,
-  );
-
-  status(
-    `${roleTag} ${candidates.length} candidates ranked (from ${allHits.length} hits across ${task.extraEngines.length + 1} engine(s))`,
-  );
+  const ranked = rankCandidates(filtered.length > 0 ? filtered : scored, poolSize);
+  const candidates = capCandidatesPerHost(ranked, 2);
+  metrics.rankedCandidates = candidates.length;
+  metrics.fetchCandidates = candidates.length;
+  status(`${roleTag} ${candidates.length} candidates ranked (from ${allHits.length} hits across ${task.extraEngines.length + 1} engine(s))`);
 
   await fetchBatch(
     candidates,
@@ -256,24 +348,15 @@ export async function runWorker(
     errors,
     roleTag,
     topicKws,
+    metrics,
   );
 
-  if (
-    task.followLinks &&
-    sources.length > 0 &&
-    sources.length < task.pageBudget
-  ) {
+  if (task.followLinks && sources.length > 0 && sources.length < task.pageBudget) {
     for (let depth = 1; depth <= task.linkCrawlDepth; depth++) {
       if (sources.length >= task.pageBudget || signal.aborted) break;
-
-      const budget = Math.min(
-        task.pageBudget - sources.length,
-        task.maxLinksToFollow,
-      );
+      const budget = Math.min(task.pageBudget - sources.length, task.maxLinksToFollow);
       if (budget <= 0) break;
-
-      const sourcesForLinks =
-        depth === 1 ? sources : sources.slice(-budget * 2);
+      const sourcesForLinks = depth === 1 ? sources : sources.slice(-budget * 2);
       const newCount = await followLinks(
         sourcesForLinks,
         task,
@@ -287,9 +370,10 @@ export async function runWorker(
         budget,
         topicKws,
         depth,
+        metrics,
       );
-
-      if (newCount === 0) break; // no new sources at this depth, stop going deeper
+      metrics.followedLinks += newCount;
+      if (newCount === 0) break;
     }
   }
 
@@ -299,36 +383,9 @@ export async function runWorker(
     }
   }
 
-  if (sources.length < task.pageBudget && !signal.aborted) {
-    const discoveries = state.drainDiscoveries(
-      Math.min(5, task.pageBudget - sources.length),
-    );
-    if (discoveries.length > 0) {
-      status(
-        `${roleTag} Picking up ${discoveries.length} cross-worker discoveries…`,
-      );
-      const discCandidates = discoveries.map((d) =>
-        scoreCandidate(
-          { url: d.url, title: d.title, snippet: "" },
-          task.queries[0] ?? "",
-        ),
-      );
-      await fetchBatch(
-        discCandidates,
-        { ...task, pageBudget: sources.length + discoveries.length },
-        state,
-        signal,
-        status,
-        warn,
-        sources,
-        errors,
-        roleTag,
-        topicKws,
-      );
-    }
-  }
-
-  status(`${roleTag} Done - ${sources.length} sources collected`);
+  metrics.acceptedSources = sources.length;
+  state.mergeMetrics(metrics);
+  status(`✅ ${roleTag} Mission Complete - ${sources.length} high-quality sources collected!`);
   return {
     taskId: task.id,
     role: task.role,
@@ -350,83 +407,123 @@ async function fetchBatch(
   errors: string[],
   tag: string,
   topicKws: ReadonlyArray<string>,
+  metrics: CrawlMetrics,
 ): Promise<void> {
   let idx = 0;
   const concurrency = task.workerConcurrency;
   const domainCap = task.maxPagesPerDomain;
   const minRelevance = task.minRelevanceScore;
-
-  while (
-    results.length < task.pageBudget &&
-    idx < candidates.length &&
-    !signal.aborted
-  ) {
+  while (results.length < task.pageBudget && idx < candidates.length && !signal.aborted) {
     const batch = candidates
-  .slice(idx, idx + concurrency)
-  .filter(
-    (c) =>
-      !state.visitedUrls.has(c.url) &&
-      state.domainCount(c.url) < domainCap &&
-      !state.shouldAvoidUrl(c.url),
-  );
+      .slice(idx, idx + concurrency)
+      .filter(
+        (c) =>
+          !state.visitedUrls.has(normalizeUrl(c.url)) &&
+          state.domainCount(c.url) < domainCap &&
+          !state.shouldAvoidUrl(c.url) &&
+          !state.isDomainBlacklisted(c.url),
+      );
     idx += concurrency;
-
     if (batch.length === 0) continue;
-
-    for (const c of batch) state.addVisited(c.url);
-
+    for (const c of batch) {
+      state.addVisited(c.url);
+    }
     const settled = await Promise.allSettled(
-      batch.map((c) =>
-        fetchAndExtract(c.url, c.query, c.snippet, task, topicKws, signal),
-      ),
+      batch.map((c) => resolveCandidate(c, task, state, topicKws, signal)),
     );
-
     for (let i = 0; i < settled.length; i++) {
       const candidate = batch[i];
-      const result = settled[i];
-
+      const settledResult = settled[i];
       if (signal.aborted) return;
-
-      if (result.status === "rejected") {
-   if (!isAbortError(result.reason)) {
-     const msg = errorMessage(result.reason);
-     state.noteFailure(candidate.url, msg);
-     warn(`${tag} Failed: ${truncUrl(candidate.url)} - ${msg}`);
-     errors.push(`fetch:${candidate.url}: ${msg}`);
-   }
-   continue;
- }
-
-      const page = result.value;
-      if (page.wordCount < MIN_USEFUL_WORD_COUNT) continue;
-
-      if (page.relevanceScore < minRelevance) {
-        status(
-          `${tag} Skipped (off-topic, rel=${page.relevanceScore.toFixed(2)}): ${truncUrl(candidate.url)}`,
-        );
+      if (settledResult.status === "rejected") {
+        if (!isAbortError(settledResult.reason)) {
+          const msg = errorMessage(settledResult.reason);
+          metrics.fetchFailures++;
+          state.noteFailure(candidate.url, msg);
+          state.noteDomainFailure(candidate.url);
+          warn(`${tag} Failed: ${truncUrl(candidate.url)} - ${msg}`);
+          errors.push(`fetch:${candidate.url}: ${msg}`);
+        }
         continue;
       }
-
+      const { page, fromCache } = settledResult.value;
+      if (page.wordCount < MIN_USEFUL_WORD_COUNT) {
+        metrics.skippedLowWordCount++;
+        continue;
+      }
+      if (page.relevanceScore < minRelevance * 0.5) {
+        metrics.skippedVeryOffTopic++;
+        state.noteDomainFailure(candidate.url);
+        status(`${tag} Skipped (very off-topic, rel=${page.relevanceScore.toFixed(2)}): ${truncUrl(candidate.url)}`);
+        continue;
+      }
+      if (page.relevanceScore < minRelevance) {
+        metrics.skippedOffTopic++;
+        status(`${tag} Skipped (off-topic, rel=${page.relevanceScore.toFixed(2)}): ${truncUrl(candidate.url)}`);
+        continue;
+      }
       const fp = contentFingerprint(page.text);
       if (state.contentHashes.has(fp)) {
+        metrics.skippedDuplicateContent++;
         status(`${tag} Skipped duplicate: ${truncUrl(candidate.url)}`);
         continue;
       }
-
       state.addHash(fp);
       state.incrementDomain(candidate.url);
       results.push(page);
-      status(
-        `${tag} [${results.length}/${task.pageBudget}] (rel=${page.relevanceScore.toFixed(2)}) ${page.title.slice(0, 60)}`,
-      );
-
+      status(`${tag} [${results.length}/${task.pageBudget}] ${fromCache ? "[cache] " : ""}(rel=${page.relevanceScore.toFixed(2)}) ${page.title.slice(0, 60)}`);
       if (results.length >= task.pageBudget) return;
     }
-
     if (idx < candidates.length && results.length < task.pageBudget) {
       await sleep(BATCH_INTER_FETCH_DELAY_MS);
     }
   }
+}
+
+async function resolveCandidate(
+  candidate: ScoredCandidate,
+  task: SwarmTask,
+  state: SharedCrawlState,
+  topicKws: ReadonlyArray<string>,
+  signal: AbortSignal,
+): Promise<{ page: CrawledSource; fromCache: boolean }> {
+  const cached = state.getCachedSource(candidate.url);
+  if (cached) {
+    return {
+      page: adaptCachedSourceForTask(cached, candidate.query, candidate.snippet, task, topicKws),
+      fromCache: true,
+    };
+  }
+  return {
+    page: await fetchAndExtract(candidate.url, candidate.query, candidate.snippet, task, topicKws, signal),
+    fromCache: false,
+  };
+}
+
+function adaptCachedSourceForTask(
+  cached: CrawledSource,
+  query: string,
+  snippet: string,
+  task: SwarmTask,
+  topicKws: ReadonlyArray<string>,
+): CrawledSource {
+  const { domainScore, freshnessScore, tier } = scoreCandidate(
+    { url: cached.url, title: cached.title, snippet: cached.description },
+    query,
+  );
+  const relevanceScore = computeRelevance(cached.text, cached.title, snippet, topicKws);
+  return {
+    ...cached,
+    url: normalizeUrl(cached.url),
+    finalUrl: normalizeUrl(cached.finalUrl ?? cached.url),
+    sourceQuery: query,
+    workerRole: task.role,
+    workerLabel: task.label,
+    domainScore,
+    freshnessScore,
+    tier: tier as SourceTier,
+    relevanceScore,
+  };
 }
 
 async function followLinks(
@@ -442,6 +539,7 @@ async function followLinks(
   budget: number,
   topicKws: ReadonlyArray<string>,
   depth: number,
+  metrics: CrawlMetrics,
 ): Promise<number> {
   const allLinks = existingSources.flatMap((s) => s.outlinks);
   const linkKws = task.queries
@@ -450,27 +548,14 @@ async function followLinks(
     .split(/\s+/)
     .filter((w) => w.length > 3)
     .slice(0, 12);
-
-  const scored = scoreOutlinks(
-    allLinks,
-    linkKws,
-    state.visitedUrls,
-    task.maxLinksToEvaluate,
-  );
-
+  const scored = scoreOutlinks(allLinks, linkKws, state.visitedUrls, task.maxLinksToEvaluate);
   const toFollow = scored.slice(0, task.maxLinksToFollow);
   if (toFollow.length === 0) return 0;
-
   status(`${tag} Following ${toFollow.length} link(s) (depth ${depth})…`);
-
   const before = results.length;
   const linkCandidates = toFollow.map((l) =>
-    scoreCandidate(
-      { url: l.href, title: "", snippet: "" },
-      task.queries[0] ?? "",
-    ),
+    scoreCandidate({ url: l.href, title: "", snippet: "" }, task.queries[0] ?? ""),
   );
-
   await fetchBatch(
     linkCandidates,
     { ...task, pageBudget: results.length + budget },
@@ -482,8 +567,8 @@ async function followLinks(
     errors,
     tag,
     topicKws,
+    metrics,
   );
-
   return results.length - before;
 }
 
@@ -495,50 +580,28 @@ async function fetchAndExtract(
   topicKws: ReadonlyArray<string>,
   signal: AbortSignal,
 ): Promise<CrawledSource> {
-  const fetchResult = await fetchPage(url, signal);
+  const fetchResult = await fetchWithWaybackFallback(url, signal);
   const { finalUrl } = fetchResult;
-
   const isPdf =
     (fetchResult.rawBuffer && isPdfContentType(fetchResult.contentType)) ||
     (!fetchResult.rawBuffer && isPdfUrl(url));
-
   let page;
   if (isPdf && fetchResult.rawBuffer) {
-    page = await extractPdf(
-      fetchResult.rawBuffer,
-      url,
-      finalUrl,
-      task.contentLimit,
-      false,
-    );
+    page = await extractPdf(fetchResult.rawBuffer, url, finalUrl, task.contentLimit, false);
   } else if (isPdf && fetchResult.html && fetchResult.html.startsWith("%PDF")) {
     const buf = Buffer.from(fetchResult.html, "binary");
     page = await extractPdf(buf, url, finalUrl, task.contentLimit, false);
   } else {
-    page = extractPage(
-      fetchResult.html,
-      url,
-      finalUrl,
-      task.contentLimit,
-      task.maxOutlinksPerPage,
-    );
+    page = extractPage(fetchResult.html, url, finalUrl, task.contentLimit, task.maxOutlinksPerPage);
   }
-
   const { domainScore, freshnessScore, tier } = scoreCandidate(
     { url, title: page.title, snippet: page.description },
     query,
   );
-
-  const relevanceScore = computeRelevance(
-    page.text,
-    page.title,
-    snippet,
-    topicKws,
-  );
-
+  const relevanceScore = computeRelevance(page.text, page.title, snippet, topicKws);
   return {
-    url: page.url,
-    finalUrl: page.finalUrl,
+    url: normalizeUrl(page.url),
+    finalUrl: normalizeUrl(page.finalUrl),
     title: page.title,
     description: page.description,
     published: page.published,
@@ -558,13 +621,109 @@ async function fetchAndExtract(
   };
 }
 
-function deduplicateByUrl<T extends { url: string }>(items: T[]): T[] {
+async function getLLMQueryMutation(
+  query: string,
+  topSnippets: string[],
+  signal: AbortSignal,
+): Promise<string | null> {
+  try {
+    const endpoint = "http://localhost:1234/v1/chat/completions";
+    const prompt = `You are a deep research assistant. The initial query "${query}" yielded these snippets:\n${topSnippets.slice(0, 3).join("\n")}\n\nGenerate ONE highly specific, alternative search query to find missing technical details or counter-arguments. Return ONLY the raw query string, no quotes or explanations.`;
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal,
+      body: JSON.stringify({
+        model: "local-model",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.7,
+        max_tokens: 40,
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const mutated = data.choices?.[0]?.message?.content?.trim();
+    return mutated ? mutated.replace(/^[\"']|[\"']$/g, "") : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchWithWaybackFallback(
+  url: string,
+  signal: AbortSignal,
+): Promise<Awaited<ReturnType<typeof fetchPage>>> {
+  try {
+    return await fetchPage(url, signal);
+  } catch (err) {
+    try {
+      const api = `https://archive.org/wayback/available?url=${encodeURIComponent(url)}`;
+      const apiRes = await fetch(api, { signal });
+      if (!apiRes.ok) throw new Error("Wayback API failed");
+      const data = await apiRes.json();
+      const wbUrl = data?.archived_snapshots?.closest?.url;
+      if (wbUrl) {
+        return await fetchPage(wbUrl, signal);
+      }
+    } catch {
+      // ignore
+    }
+    throw err;
+  }
+}
+
+function uniqueHostCount(hits: ReadonlyArray<{ url: string }>): number {
+  const hosts = new Set<string>();
+  for (const h of hits) {
+    try {
+      hosts.add(new URL(h.url).hostname.replace(/^www./, ""));
+    } catch {
+      // ignore
+    }
+  }
+  return hosts.size;
+}
+
+function mutationQuality(hits: ReadonlyArray<{ url: string }>): number {
+  return uniqueHostCount(hits) * 10 + Math.min(hits.length, 10);
+}
+
+function deduplicateByUrl<T extends { url: string }>(items: ReadonlyArray<T>): T[] {
   const seen = new Set<string>();
   return items.filter((item) => {
-    if (seen.has(item.url)) return false;
-    seen.add(item.url);
+    const key = normalizeUrl(item.url);
+    if (seen.has(key)) return false;
+    seen.add(key);
     return true;
   });
+}
+
+function capCandidatesPerHost(
+  candidates: ReadonlyArray<ScoredCandidate>,
+  maxPerHost: number,
+): ScoredCandidate[] {
+  const perHost = new Map<string, number>();
+  const kept: ScoredCandidate[] = [];
+  for (const c of candidates) {
+    const host = safeHostname(c.url);
+    const count = perHost.get(host) ?? 0;
+    if (count >= maxPerHost) continue;
+    perHost.set(host, count + 1);
+    kept.push(c);
+  }
+  return kept;
+}
+
+function safeHostname(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www./, "");
+  } catch {
+    return "";
+  }
+}
+
+function truncUrl(url: string, max = 70): string {
+  return url.length > max ? url.slice(0, max) + "…" : url;
 }
 
 function isAbortError(err: unknown): boolean {
@@ -573,8 +732,4 @@ function isAbortError(err: unknown): boolean {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err ?? "unknown");
-}
-
-function truncUrl(url: string, max = 70): string {
-  return url.length > max ? url.slice(0, max) + "…" : url;
 }

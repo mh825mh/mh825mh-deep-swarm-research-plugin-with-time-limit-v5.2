@@ -1,15 +1,13 @@
 /**
- * @file net/extractor.ts
- * Extracts clean structured content from raw HTML.
- * Uses Mozilla Readability as the primary extractor,
- * with a tag-stripping fallback for pages it cannot parse.
- *
- * Aggressive boilerplate removal runs BEFORE Readability (nav, footer,
- * sidebar, cookie banners, ads, social widgets, comments). Outlink limit
- * is configurable and scales with the depth profile. Whitespace
- * normalization preserves paragraph structure.
- */
-
+@file net/extractor.ts
+Extracts clean structured content from raw HTML.
+Uses Mozilla Readability as the primary extractor,
+with a tag-stripping fallback for pages it cannot parse.
+Aggressive boilerplate removal runs BEFORE Readability (nav, footer,
+sidebar, cookie banners, ads, social widgets, comments). Outlink limit
+is configurable and scales with the depth profile. Whitespace
+normalization preserves paragraph structure.
+*/
 import { JSDOM, VirtualConsole } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import TurndownService from "turndown";
@@ -27,7 +25,7 @@ import {
 } from "../constants";
 
 const virtualConsole = new VirtualConsole();
-virtualConsole.on("error", () => { });
+virtualConsole.on("error", () => {});
 
 const turndownService = new TurndownService({
   headingStyle: "atx",
@@ -36,14 +34,9 @@ const turndownService = new TurndownService({
   bulletListMarker: "-",
 });
 
-/** CSS/style tags to strip before DOM parsing */
 const STRIP_BEFORE_PARSE_RE =
   /<style[\s\S]*?<\/style>|<link[^>]+rel=["']stylesheet["'][^>]*>/gi;
 
-/**
- * Selectors for elements that are almost always boilerplate/noise.
- * Removing these before Readability dramatically improves extraction quality.
- */
 const BOILERPLATE_SELECTORS: ReadonlyArray<string> = [
   "nav",
   "header",
@@ -95,7 +88,7 @@ const BOILERPLATE_SELECTORS: ReadonlyArray<string> = [
   '[role="banner"]',
   '[role="contentinfo"]',
   '[role="complementary"]',
-  '[aria-label="cookie"]',
+  '[aria-label*="cookie"]',
   '[class*="cookie"]',
   '[id*="cookie"]',
   '[class*="gdpr"]',
@@ -112,21 +105,42 @@ const BOILERPLATE_SELECTORS: ReadonlyArray<string> = [
   "figcaption",
   "noscript",
   "iframe",
+  ".paywall",
+  ".meteredPaywall",
+  ".subscription-wall",
+  ".article-body-paywall",
+  "#piano_wrapper",
+  ".fancybox-overlay",
+  ".mfp-wrap",
+  ".tp-modal",
+  ".newsletter-popup",
+  ".email-subscribe",
+  ".inline-signup",
+  ".subscribe-modal",
+  ".newsletter-signup",
+  ".newsletter-container",
+  ".mc-modal",
+  ".cookie-wall",
+  ".consent-wall",
+  "#onetrust-consent-sdk",
 ];
 
-/**
- * Strip boilerplate elements from the DOM before Readability processes it.
- * This is THE key improvement for content quality - Readability often
- * includes nav/footer text when these elements are present.
- */
 function stripBoilerplate(doc: Document): void {
+  const mediaSelectors =
+    "img, picture, video, audio, svg, canvas, iframe, object, embed";
+  doc.querySelectorAll(mediaSelectors).forEach((el) => el.remove());
+
+  const hiddenSelectors =
+    '[aria-hidden="true"], [style*="display:none"], [style*="display: none"], [style*="visibility:hidden"], [style*="opacity: 0"]';
+  doc.querySelectorAll(hiddenSelectors).forEach((el) => el.remove());
+
   for (const selector of BOILERPLATE_SELECTORS) {
     try {
       const elements = doc.querySelectorAll(selector);
       for (const el of Array.from(elements)) {
         el.remove();
       }
-    } catch { }
+    } catch {}
   }
 
   try {
@@ -139,7 +153,7 @@ function stripBoilerplate(doc: Document): void {
         el.remove();
       }
     }
-  } catch { }
+  } catch {}
 }
 
 const DEFAULT_MAX_OUTLINKS = 40;
@@ -163,7 +177,7 @@ export function extractPage(
   const published = extractPublishedDate(doc, finalUrl);
   const outlinks = extractOutlinks(doc, finalUrl, maxOutlinks);
   const { text, totalLength } = extractText(doc, html, contentLimit, page);
-  const wordCount = countWords(text);
+  const wordCount = text.split(/\s+/).filter(Boolean).length;
 
   return {
     url: sourceUrl,
@@ -183,24 +197,15 @@ function extractTitle(doc: Document): string {
   return (
     doc.querySelector("h1")?.textContent?.trim() ||
     doc.title?.trim() ||
-    doc
-      .querySelector('meta[property="og:title"]')
-      ?.getAttribute("content")
-      ?.trim() ||
+    doc.querySelector('meta[property="og:title"]')?.getAttribute("content")?.trim() ||
     ""
   );
 }
 
 function extractDescription(doc: Document): string {
   return (
-    doc
-      .querySelector('meta[name="description"]')
-      ?.getAttribute("content")
-      ?.trim() ||
-    doc
-      .querySelector('meta[property="og:description"]')
-      ?.getAttribute("content")
-      ?.trim() ||
+    doc.querySelector('meta[name="description"]')?.getAttribute("content")?.trim() ||
+    doc.querySelector('meta[property="og:description"]')?.getAttribute("content")?.trim() ||
     ""
   );
 }
@@ -215,7 +220,7 @@ const DATE_META_SELECTORS: ReadonlyArray<string> = [
   "time[datetime]",
 ];
 
-const URL_DATE_RE = /\/(20\d{2})\/(0[1-9]|1[0-2])\/(0[1-9]|[12]\d|3[01])\//;
+const URL_DATE_RE = /(20\d{2})\/(0[1-9]|1[0-2])\/(0[1-9]|[12]\d|3[01])/;
 
 function extractPublishedDate(doc: Document, url: string): string | null {
   for (const script of Array.from(
@@ -245,7 +250,6 @@ function extractPublishedDate(doc: Document, url: string): string | null {
 
   const m = URL_DATE_RE.exec(url);
   if (m) return `${m[1]}-${m[2]}-${m[3]}`;
-
   return null;
 }
 
@@ -270,14 +274,29 @@ function extractText(
 
   try {
     const cloned = doc.cloneNode(true) as Document;
-    const article = new Readability(cloned).parse();
+    const article = new Readability(cloned, {
+      classesToPreserve: [
+        "table",
+        "data-table",
+        "code",
+        "pre",
+        "highlight",
+        "math",
+        "latex",
+        "language-",
+      ],
+      charThreshold: 100,
+    }).parse();
 
     if (article?.content) {
       const markdown = turndownService.turndown(article.content);
       const cleaned = markdown
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+        .replace(/!\[([^\]]*)\]\([^)]+\)/g, "")
         .replace(/[ \t]+/g, " ")
         .replace(/\n{3,}/g, "\n\n")
         .trim();
+
       if (cleaned.length > MIN_READABILITY_TEXT_LEN) {
         return {
           text: cleaned.slice(start, end),
@@ -325,10 +344,8 @@ function extractOutlinks(
     doc.querySelectorAll<HTMLAnchorElement>("a[href]"),
   )) {
     if (links.length >= maxOutlinks) break;
-
     const href = el.href;
     const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
-
     if (!href.startsWith("http")) continue;
     if (seen.has(href)) continue;
     if (
@@ -336,24 +353,17 @@ function extractOutlinks(
       text.length > OUTLINK_TEXT_MAX_LEN
     )
       continue;
-
     try {
       if (new URL(href).hostname === baseHost) continue;
     } catch {
       continue;
     }
-
     seen.add(href);
     links.push({ text, href });
   }
-
   return links;
 }
 
-/**
- * Samples words from the beginning, middle, and end of the text
- * to avoid false positives from shared boilerplate intros.
- */
 export function contentFingerprint(text: string): string {
   const words = text
     .toLowerCase()
@@ -372,13 +382,9 @@ export function contentFingerprint(text: string): string {
   const midStart = Math.floor((words.length - FINGERPRINT_MID_WORDS) / 2);
   const mid = words.slice(midStart, midStart + FINGERPRINT_MID_WORDS);
   const tail = words.slice(-FINGERPRINT_TAIL_WORDS);
-
   return [...head, ...mid, ...tail].join(" ");
 }
 
-/**
- * Computes a 0-1 relevance score measuring how on-topic a page is.
- */
 export function computeRelevance(
   text: string,
   title: string,
@@ -410,6 +416,7 @@ export function computeRelevance(
       idx += kw.length;
     }
   }
+
   const densityWordCount = densityText.split(/\s+/).length;
   const density = Math.min(
     1,
@@ -417,9 +424,12 @@ export function computeRelevance(
   );
   score += density * 0.1;
 
-  return Math.min(1, Math.max(0, score));
-}
+  const urlCount = (text.match(/https?:\/\/[^\s)]+/g) || []).length;
+  const wordCount = text.split(/\s+/).length;
+  const urlDensity = urlCount / Math.max(1, wordCount);
+  if (urlDensity > 0.05) {
+    score *= 0.5;
+  }
 
-function countWords(text: string): number {
-  return text.split(/\s+/).filter(Boolean).length;
+  return Math.min(1, Math.max(0, score));
 }

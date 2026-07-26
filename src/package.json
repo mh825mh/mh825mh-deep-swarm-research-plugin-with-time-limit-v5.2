@@ -1,7 +1,7 @@
 {
-  "name": "lms-plugin-deep-swarm-research-with-time-limit",
-  "version": "5",
-  "description": "LM Studio plugin for Deep Research with time limit- autonomously searches, reads, and synthesizes multi-source web research in one tool call.",
+  "name": "lms-plugin-deep-swarm-research",
+  "version": "5.1.0",
+  "description": "LM Studio plugin for Deep Research - autonomously searches, reads, and synthesizes multi-source web research in one tool call.",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",

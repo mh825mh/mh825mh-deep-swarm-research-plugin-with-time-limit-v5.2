@@ -1,13 +1,3 @@
-/**
- * @file planning/planner.ts
- * Generates search queries and worker decompositions for the swarm.
- * Supports dynamic AI task decomposition, inter-agent findings summaries,
- * and adaptive gap-fill with targeted worker roles.
- *
- * Now accepts a DepthProfile so query counts, worker limits, and
- * decomposition parameters all scale with the chosen depth preset.
- */
-
 import { LMStudioClient } from "@lmstudio/sdk";
 import {
   QueryPlan,
@@ -45,18 +35,13 @@ async function callLoadedModel(
 ): Promise<string | null> {
   try {
     const client = new LMStudioClient();
-
-    const models = await Promise.race<
-      Awaited<ReturnType<typeof client.llm.listLoaded>>
-    >([
+    const models = await Promise.race<Awaited<ReturnType<typeof client.llm.listLoaded>>>([
       client.llm.listLoaded(),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("timeout")), timeoutMs),
       ),
     ]);
-
     if (!Array.isArray(models) || models.length === 0) return null;
-
     const model = await client.llm.model(models[0].identifier);
     const stream = model.respond(
       [
@@ -68,10 +53,8 @@ async function callLoadedModel(
         temperature,
       },
     );
-
     let result = "";
     for await (const chunk of stream) result += chunk.content ?? "";
-
     return result.trim() || null;
   } catch {
     return null;
@@ -112,25 +95,21 @@ function makeDecompositionPrompt(
     ? `\nFocus areas: ${focusAreas.join(", ")}`
     : "";
   return `You are a research decomposition system. Given a research topic, output a JSON array of specialized worker agents.
-
 Topic: "${topic}"${focus}
-
 Each worker needs:
-- "role": one of "breadth", "depth", "recency", "academic", "critical", "statistical", "regulatory", "technical", "primary", "comparative"
-- "label": descriptive name (e.g., "Clinical Evidence Researcher", "Policy Critic")
-- "queries": array of ${Math.min(profile.maxQueriesPerWorker, 6)}-${profile.maxQueriesPerWorker} specific search queries for this worker
-- "budgetWeight": number 0.1-0.4 (must sum to ~1.0 across all workers)
-- "followLinks": true/false (true for depth/academic workers)
-- "preferredTiers": optional array of "academic","government","reference","news","professional","general"
-
+"role": one of "breadth", "depth", "recency", "academic", "critical", "statistical", "regulatory", "technical", "primary", "comparative"
+"label": descriptive name (e.g., "Clinical Evidence Researcher", "Policy Critic")
+"queries": array of ${Math.min(profile.maxQueriesPerWorker, 6)}-${profile.maxQueriesPerWorker} specific search queries for this worker
+"budgetWeight": number 0.1-0.4 (must sum to ~1.0 across all workers)
+"followLinks": true/false (true for depth/academic workers)
+"preferredTiers": optional array of "academic","government","reference","news","professional","general"
 Rules:
-- Output ${DECOMPOSITION_MIN_WORKERS} to ${profile.maxDecompositionWorkers} workers
-- Tailor the workers to THIS specific topic - not generic roles
-- Queries must be highly specific to the topic and each worker's assignment
-- Generate MORE queries for broader or more complex topics
-- Budget weights must roughly sum to 1.0
-- Output ONLY valid JSON, no other text
-
+Output ${DECOMPOSITION_MIN_WORKERS} to ${profile.maxDecompositionWorkers} workers
+Tailor the workers to THIS specific topic - not generic roles
+Queries must be highly specific to the topic and each worker's assignment
+Generate MORE queries for broader or more complex topics
+Budget weights must roughly sum to 1.0
+Output ONLY valid JSON, no other text
 JSON:`;
 }
 
@@ -146,26 +125,21 @@ async function aiDecompose(
     AI_DECOMPOSITION_TEMPERATURE,
     AI_DECOMPOSITION_TIMEOUT_MS,
   );
-
   if (!raw) return null;
-
   try {
     const jsonStr = raw.replace(/```json\s*|```\s*/g, "").trim();
     const parsed = JSON.parse(jsonStr);
-
     if (!Array.isArray(parsed) || parsed.length < DECOMPOSITION_MIN_WORKERS)
       return null;
-
     const specs: DynamicWorkerSpec[] = [];
     for (const item of parsed.slice(0, profile.maxDecompositionWorkers)) {
       const role = VALID_ROLES.includes(item.role) ? item.role : "breadth";
       const queries = Array.isArray(item.queries)
         ? item.queries
-          .filter((q: unknown) => typeof q === "string" && q.length > 3)
-          .slice(0, profile.maxQueriesPerWorker)
+            .filter((q: unknown) => typeof q === "string" && q.length > 3)
+            .slice(0, profile.maxQueriesPerWorker)
         : [];
       if (queries.length < 2) continue;
-
       specs.push({
         role: role as WorkerRole,
         label:
@@ -183,15 +157,12 @@ async function aiDecompose(
           : undefined,
       });
     }
-
     if (specs.length < DECOMPOSITION_MIN_WORKERS) return null;
-
     const totalWeight = specs.reduce((sum, s) => sum + s.budgetWeight, 0);
     const normalised = specs.map((s) => ({
       ...s,
       budgetWeight: s.budgetWeight / totalWeight,
     }));
-
     status(`AI decomposed topic into ${normalised.length} specialised workers`);
     return normalised;
   } catch {
@@ -207,44 +178,29 @@ function makeRolePlanPrompt(
 ): string {
   const roleDescriptions: Readonly<Record<WorkerRole, string>> = {
     breadth: "broad coverage - many different angles, facts, and sub-topics",
-    depth:
-      "deep dive - mechanisms, how it works, technical detail, and evidence",
-    recency:
-      "recent developments - 2024-2026+ news, updates, and latest research",
-    academic:
-      "academic and scientific sources - peer-reviewed studies, journals, authoritative papers",
-    critical:
-      "critical analysis - limitations, counterarguments, criticism, controversy, drawbacks",
-    statistical:
-      "statistics and data - numbers, percentages, datasets, surveys, market sizes, quantitative evidence",
-    regulatory:
-      "regulatory and policy - laws, regulations, government policies, compliance, standards, guidelines",
-    technical:
-      "technical deep-dive - implementation details, specifications, architecture, engineering approaches",
-    primary:
-      "primary sources - original reports, official statements, first-hand accounts, press releases, white papers",
-    comparative:
-      "comparative analysis - vs alternatives, head-to-head comparisons, benchmarks, trade-offs, pros and cons",
+    depth: "deep dive - mechanisms, how it works, technical detail, and evidence",
+    recency: "recent developments - 2024-2026+ news, updates, and latest research",
+    academic: "academic and scientific sources - peer-reviewed studies, journals, authoritative papers",
+    critical: "critical analysis - limitations, counterarguments, criticism, controversy, drawbacks",
+    statistical: "statistics and data - numbers, percentages, datasets, surveys, market sizes, quantitative evidence",
+    regulatory: "regulatory and policy - laws, regulations, government policies, compliance, standards, guidelines",
+    technical: "technical deep-dive - implementation details, specifications, architecture, engineering approaches",
+    primary: "primary sources - original reports, official statements, first-hand accounts, press releases, white papers",
+    comparative: "comparative analysis - vs alternatives, head-to-head comparisons, benchmarks, trade-offs, pros and cons",
   };
-
   const focus = focusAreas.length
     ? `\nFocus especially on: ${focusAreas.join(", ")}`
     : "";
-
   return `You are a research planning assistant. Generate search queries for a specialised research agent.
-
 Topic: "${topic}"${focus}
-
 This agent's role: ${roleDescriptions[role]}
-
 Generate exactly ${profile.maxQueriesPerWorker} highly specific, diverse search queries for this role.
 Rules:
-- Each query must be different from the others
-- Use natural language (as a human would type into a search engine)
-- Be specific to the role - ${roleDescriptions[role]}
-- Vary query structure: some factual, some comparative, some recent
-- Return ONLY the queries, one per line, no numbering, no extra text
-
+Each query must be different from the others
+Use natural language (as a human would type into a search engine)
+Be specific to the role - ${roleDescriptions[role]}
+Vary query structure: some factual, some comparative, some recent
+Return ONLY the queries, one per line, no numbering, no extra text
 Queries:`;
 }
 
@@ -270,24 +226,19 @@ function dimensionFallbackQueries(
   const dimIds = ROLE_DIMENSIONS[role];
   const dims = DIMENSIONS.filter((d) => dimIds.includes(d.id));
   const queries: string[] = [];
-
   const shortTopic = shortenTopic(topic);
-
   for (const dim of dims) {
     for (const q of dim.queries(shortTopic)) {
       if (!queries.includes(q)) queries.push(q);
     }
   }
-
   for (const area of focusAreas) {
     const q = `${shortTopic} ${area}`;
     if (!queries.includes(q)) queries.push(q);
   }
-
   return queries.slice(0, maxQueries);
 }
 
-/** Builds a full QueryPlan using AI decomposition, per-role planning, or dimension fallback. */
 export async function buildQueryPlan(
   topic: string,
   focusAreas: ReadonlyArray<string>,
@@ -309,7 +260,6 @@ export async function buildQueryPlan(
     "primary",
     "comparative",
   ];
-
   let roles: ReadonlyArray<WorkerRole>;
   if (profile.depthRounds >= 10) {
     roles = [...CORE_ROLES, ...EXTENDED_ROLES];
@@ -318,28 +268,22 @@ export async function buildQueryPlan(
   } else {
     roles = CORE_ROLES;
   }
-
   const queriesByRole: Partial<Record<WorkerRole, ReadonlyArray<string>>> = {};
   let usedAI = false;
   let dynamicSpecs: ReadonlyArray<DynamicWorkerSpec> | undefined;
-
   if (useAI) {
     status("AI task decomposition - analysing topic for specialised workers…");
     const specs = await aiDecompose(topic, focusAreas, status, profile);
-
     if (specs && specs.length >= DECOMPOSITION_MIN_WORKERS) {
       dynamicSpecs = specs;
       usedAI = true;
-
       for (const spec of specs) {
         queriesByRole[spec.role] = spec.queries;
       }
     } else {
       status("AI planning queries for each swarm worker…");
     }
-
     const uncoveredRoles = roles.filter((r) => !queriesByRole[r]?.length);
-
     if (uncoveredRoles.length > 0) {
       const results = await Promise.allSettled(
         uncoveredRoles.map(async (role) => ({
@@ -349,7 +293,6 @@ export async function buildQueryPlan(
           ),
         })),
       );
-
       for (const result of results) {
         if (result.status !== "fulfilled") continue;
         const { role, queries: raw } = result.value;
@@ -361,7 +304,6 @@ export async function buildQueryPlan(
         }
       }
     }
-
     if (usedAI) {
       status(
         `AI generated queries for ${Object.keys(queriesByRole).length} worker role(s)`,
@@ -370,7 +312,6 @@ export async function buildQueryPlan(
       status("AI unavailable, using dimension-based query planning");
     }
   }
-
   for (const role of roles) {
     if (!queriesByRole[role] || queriesByRole[role]!.length === 0) {
       queriesByRole[role] = dimensionFallbackQueries(
@@ -381,7 +322,6 @@ export async function buildQueryPlan(
       );
     }
   }
-
   return {
     queriesByRole: queriesByRole as Record<WorkerRole, ReadonlyArray<string>>,
     usedAI,
@@ -390,7 +330,6 @@ export async function buildQueryPlan(
   };
 }
 
-/** Summarises Round 1 findings so gap-fill workers have context. */
 export async function summariseFindings(
   sources: ReadonlyArray<CrawledSource>,
   topic: string,
@@ -398,7 +337,6 @@ export async function summariseFindings(
   status: StatusFn,
 ): Promise<ReadonlyArray<AgentMessage>> {
   if (!useAI || sources.length === 0) return [];
-
   const sourceSummaries = sources
     .slice(0, 20)
     .map(
@@ -406,38 +344,29 @@ export async function summariseFindings(
         `[${i + 1}] ${s.workerLabel}: ${s.title} - ${s.text.slice(0, FINDINGS_SUMMARY_SOURCE_CHARS)}`,
     )
     .join("\n\n");
-
   const prompt = `You are a research coordinator. A team of research agents collected these sources on "${topic}":
-
 ${sourceSummaries}
-
 Summarise:
-1. The 3-5 most important findings discovered so far (one line each)
-2. 3-5 specific questions or angles that were NOT covered and need follow-up
-
+The 3-5 most important findings discovered so far (one line each)
+3-5 specific questions or angles that were NOT covered and need follow-up
 Output format:
 FINDINGS:
-- finding 1
-- finding 2
+finding 1
+finding 2
 ...
-
 FOLLOW_UP:
-- question 1
-- question 2
+question 1
+question 2
 ...`;
-
   const raw = await callLoadedModel(
     prompt,
     AI_FINDINGS_SUMMARY_MAX_TOKENS,
     AI_FINDINGS_SUMMARY_TEMPERATURE,
   );
-
   if (!raw) return [];
-
   const findings: string[] = [];
   const followUps: string[] = [];
   let section: "findings" | "followup" | null = null;
-
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
     if (/^FINDINGS:/i.test(trimmed)) {
@@ -453,13 +382,10 @@ FOLLOW_UP:
     if (section === "findings") findings.push(item);
     if (section === "followup") followUps.push(item);
   }
-
   if (findings.length === 0 && followUps.length === 0) return [];
-
   status(
     `AI summarised ${findings.length} key findings, ${followUps.length} follow-up suggestions`,
   );
-
   return [
     {
       fromWorker: "round-coordinator",
@@ -469,7 +395,6 @@ FOLLOW_UP:
   ];
 }
 
-/** Maps each dimension to the worker role best suited to fill it. */
 const GAP_ROLE_MAP: Readonly<
   Record<
     string,
@@ -498,7 +423,6 @@ const GAP_ROLE_MAP: Readonly<
   economics: { role: "statistical", followLinks: false },
 };
 
-/** Generates adaptive gap-fill plans with targeted worker roles per gap. */
 export async function buildAdaptiveGapFill(
   topic: string,
   coveredIds: ReadonlyArray<string>,
@@ -512,9 +436,7 @@ export async function buildAdaptiveGapFill(
     status("All research dimensions covered - no gap queries needed");
     return [];
   }
-
   status(`Gaps: ${gaps.map((g) => g.label).join(", ")}`);
-
   const byRole = new Map<
     WorkerRole,
     {
@@ -525,9 +447,7 @@ export async function buildAdaptiveGapFill(
       tiers?: ReadonlyArray<import("../types").SourceTier>;
     }
   >();
-
   const shortTopic = shortenTopic(topic);
-
   for (const gap of gaps) {
     const mapping = GAP_ROLE_MAP[gap.id] ?? {
       role: "breadth" as WorkerRole,
@@ -545,12 +465,10 @@ export async function buildAdaptiveGapFill(
     existing.queries.push(...gap.queries(shortTopic));
     byRole.set(mapping.role, existing);
   }
-
   if (useAI) {
     const followUpContext = priorMessages
       .flatMap((m) => m.suggestedFollowUps)
       .slice(0, 6);
-
     const entries = Array.from(byRole.entries());
     const aiResults = await Promise.allSettled(
       entries.map(async ([role, group]) => {
@@ -560,18 +478,15 @@ export async function buildAdaptiveGapFill(
         );
         const prompt = `You are a research assistant. A research session on "${topic}" is missing these angles:
 ${group.dimLabels.join(", ")}
-
 ${followUpContext.length > 0 ? `Previous round suggested exploring:\n${followUpContext.join("\n")}\n` : ""}
 Generate ${queryCount} specific search queries to fill these gaps.
 The queries should be best suited for a ${role} research agent.
 Make queries diverse - cover different angles and phrasings.
 Return ONLY the queries, one per line.
-
 Queries:`;
         return { role, raw: await callLoadedModel(prompt) };
       }),
     );
-
     for (const result of aiResults) {
       if (result.status !== "fulfilled" || !result.value.raw) continue;
       const { role, raw } = result.value;
@@ -582,7 +497,6 @@ Queries:`;
       }
     }
   }
-
   const plans: AdaptiveGapPlan[] = [];
   for (const [role, group] of byRole) {
     plans.push({
@@ -593,7 +507,6 @@ Queries:`;
       preferredTiers: group.tiers,
     });
   }
-
   status(`${plans.length} adaptive gap-fill worker(s) planned`);
   return plans;
 }
@@ -645,19 +558,16 @@ function shortenTopic(topic: string): string {
   const colonIdx = topic.indexOf(":");
   const dashIdx = topic.indexOf(" - ");
   const sepIdx = colonIdx > 3 ? colonIdx : dashIdx > 3 ? dashIdx : -1;
-
   let core: string;
   if (sepIdx > 3 && sepIdx < topic.length * 0.6) {
     core = topic.slice(0, sepIdx).trim();
   } else {
     core = topic;
   }
-
   const words = core
     .replace(/[,;()]/g, " ")
     .split(/\s+/)
     .filter((w) => w.length > 1 && !STOP_WORDS.has(w.toLowerCase()));
-
   let result = "";
   let count = 0;
   for (const w of words) {
@@ -665,10 +575,8 @@ function shortenTopic(topic: string): string {
     result += (result ? " " : "") + w;
     count++;
   }
-
   if (result.length < 5) {
     result = topic.split(/\s+/).slice(0, 5).join(" ");
   }
-
   return result;
 }

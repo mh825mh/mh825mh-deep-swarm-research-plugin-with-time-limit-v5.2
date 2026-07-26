@@ -1,9 +1,3 @@
-/**
- * @file net/http.ts
- * Low-level HTTP utilities: fetch with retry logic, per-request timeout,
- * and a TLS-error fallback using Node's http/https modules directly.
- */
-
 import * as https from "node:https";
 import * as http from "node:http";
 import { setServers } from "node:dns";
@@ -34,16 +28,12 @@ function randomUA(): string {
 export function buildBrowserHeaders(url: string): Record<string, string> {
   const host = safeHostname(url);
   const ua = randomUA();
-
   const headers: Record<string, string> = {
     "User-Agent": ua,
-    Accept:
-      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
     "Accept-Encoding": "gzip, deflate, br",
-    Referer: host
-      ? `https://www.google.com/search?q=${encodeURIComponent(host)}`
-      : "https://www.google.com/",
+    Referer: host ? `https://www.google.com/search?q=${encodeURIComponent(host)}` : "https://www.google.com/",
     DNT: "1",
     Connection: "keep-alive",
     "Upgrade-Insecure-Requests": "1",
@@ -55,23 +45,16 @@ export function buildBrowserHeaders(url: string): Record<string, string> {
     Priority: "u=0, i",
   };
 
-  // Add Client Hints for Chromium-based browsers
   if (ua.includes("Chrome") || ua.includes("Edg")) {
     const isEdge = ua.includes("Edg");
     const version = isEdge ? "147" : "148";
-    const platform = ua.includes("Windows")
-      ? '"Windows"'
-      : ua.includes("Macintosh")
-        ? '"macOS"'
-        : '"Linux"';
-
+    const platform = ua.includes("Windows") ? '"Windows"' : ua.includes("Macintosh") ? '"macOS"' : '"Linux"';
     headers["Sec-CH-UA"] = isEdge
       ? `"Microsoft Edge";v="${version}", "Chromium";v="${version}", "Not:A-Brand";v="24"`
       : `"Google Chrome";v="${version}", "Chromium";v="${version}", "Not:A-Brand";v="24"`;
     headers["Sec-CH-UA-Mobile"] = "?0";
     headers["Sec-CH-UA-Platform"] = platform;
   }
-
   return headers;
 }
 
@@ -122,10 +105,8 @@ export function fetchInsecureRaw(
     } catch (e) {
       return reject(new Error(`Invalid URL: ${url}`));
     }
-
     const isHttps = parsed.protocol === "https:";
     const lib = isHttps ? https : http;
-
     const req = lib.request(
       {
         hostname: parsed.hostname,
@@ -135,55 +116,35 @@ export function fetchInsecureRaw(
         headers: { ...headers, "Accept-Encoding": "identity" },
         rejectUnauthorized: false,
         timeout: FETCH_TIMEOUT_MS,
-        family: 4, // IPv4
+        family: 4,
       },
       (res) => {
         const sc = res.statusCode ?? 0;
-
         if ([301, 302, 307, 308].includes(sc)) {
           const location = res.headers["location"];
-          if (!location)
-            return reject(new Error(`Redirect with no Location from ${url}`));
-          if (redirectsLeft <= 0)
-            return reject(new Error(`Too many redirects from ${url}`));
+          if (!location) return reject(new Error(`Redirect with no Location from ${url}`));
+          if (redirectsLeft <= 0) return reject(new Error(`Too many redirects from ${url}`));
           res.resume();
-          fetchInsecureRaw(
-            new URL(location, url).href,
-            headers,
-            signal,
-            body,
-            redirectsLeft - 1,
-          ).then(resolve, reject);
+          fetchInsecureRaw(new URL(location, url).href, headers, signal, body, redirectsLeft - 1).then(resolve, reject);
           return;
         }
-
         if (sc < 200 || sc >= 300) {
           res.resume();
           return reject(new Error(`HTTP ${sc} from ${url}`));
         }
-
         const contentType = (res.headers["content-type"] as string) || "";
         const chunks: Buffer[] = [];
         res.on("data", (chunk: Buffer) => chunks.push(chunk));
-        res.on("end", () =>
-          resolve({ data: Buffer.concat(chunks), contentType }),
-        );
+        res.on("end", () => resolve({ data: Buffer.concat(chunks), contentType }));
         res.on("error", reject);
       },
     );
-
-    signal.addEventListener(
-      "abort",
-      () => {
-        req.destroy();
-        reject(new DOMException("Aborted", "AbortError"));
-      },
-      { once: true },
-    );
+    signal.addEventListener("abort", () => {
+      req.destroy();
+      reject(new DOMException("Aborted", "AbortError"));
+    }, { once: true });
     req.on("error", reject);
-    if (body) {
-      req.write(body);
-    }
+    if (body) req.write(body);
     req.end();
   });
 }
@@ -191,9 +152,7 @@ export function fetchInsecureRaw(
 export interface FetchResult {
   readonly html: string;
   readonly finalUrl: string;
-  /** The Content-Type header from the response, if available. */
   readonly contentType?: string;
-  /** Raw response body as a Buffer (present for binary content like PDFs). */
   readonly rawBuffer?: Buffer;
 }
 
@@ -208,7 +167,6 @@ export async function fetchPage(
     const message = errorMessage(err);
     if (!/bot blocked/i.test(message)) throw err;
   }
-
   return fetchFromCache(url, signal);
 }
 
@@ -219,29 +177,16 @@ async function fetchDirect(
 ): Promise<FetchResult> {
   const headers = buildBrowserHeaders(url);
   let lastError: unknown;
-
   for (let attempt = 1; attempt <= FETCH_MAX_RETRIES; attempt++) {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-
     const timer = new AbortController();
     const timerId = setTimeout(() => timer.abort(), timeoutMs);
-
     const combined: AbortSignal =
-      typeof (AbortSignal as { any?: (sigs: AbortSignal[]) => AbortSignal })
-        .any === "function"
-        ? (AbortSignal as { any: (sigs: AbortSignal[]) => AbortSignal }).any([
-          signal,
-          timer.signal,
-        ])
+      typeof (AbortSignal as { any?: (sigs: AbortSignal[]) => AbortSignal }).any === "function"
+        ? (AbortSignal as { any: (sigs: AbortSignal[]) => AbortSignal }).any([signal, timer.signal])
         : timer.signal;
-
     try {
-      const res = await fetch(url, {
-        method: "GET",
-        signal: combined,
-        headers,
-        redirect: "follow",
-      });
+      const res = await fetch(url, { method: "GET", signal: combined, headers, redirect: "follow" });
       clearTimeout(timerId);
       if (!res.ok) {
         const code = res.status;
@@ -250,32 +195,19 @@ async function fetchDirect(
         }
         throw new Error(`HTTP ${code} ${res.statusText}`);
       }
-
       const contentType = res.headers.get("content-type") || "";
       const finalUrl = res.url || url;
-
       if (isBinaryContentType(contentType)) {
         const arrayBuf = await res.arrayBuffer();
         const rawBuffer = Buffer.from(arrayBuf);
-        return {
-          html: "",
-          finalUrl,
-          contentType,
-          rawBuffer,
-        };
+        return { html: "", finalUrl, contentType, rawBuffer };
       }
-
       return { html: await res.text(), finalUrl, contentType };
     } catch (err: unknown) {
       clearTimeout(timerId);
       const message = errorMessage(err);
-
       if (/bot blocked/i.test(message)) throw err;
-
-      const isTls = /altnames|certificate|CERT_|SSL|TLS|self[._-]signed/i.test(
-        message,
-      );
-
+      const isTls = /altnames|certificate|CERT_|SSL|TLS|self[._-]signed/i.test(message);
       if (isTls) {
         try {
           const raw = await fetchInsecureRaw(url, headers, signal);
@@ -295,100 +227,54 @@ async function fetchDirect(
           break;
         }
       }
-
       if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-
       lastError = err;
       if (attempt < FETCH_MAX_RETRIES) await sleep(FETCH_RETRY_DELAY_MS);
     }
   }
-
   throw new Error(`Failed to fetch ${url}: ${errorMessage(lastError)}`);
 }
 
-function handleInsecureResult(
-  raw: InsecureRawResult,
-  finalUrl: string,
-): FetchResult {
+function handleInsecureResult(raw: InsecureRawResult, finalUrl: string): FetchResult {
   if (isBinaryContentType(raw.contentType)) {
-    return {
-      html: "",
-      finalUrl,
-      contentType: raw.contentType,
-      rawBuffer: raw.data,
-    };
+    return { html: "", finalUrl, contentType: raw.contentType, rawBuffer: raw.data };
   }
-  return {
-    html: raw.data.toString("utf-8"),
-    finalUrl,
-    contentType: raw.contentType,
-  };
+  return { html: raw.data.toString("utf-8"), finalUrl, contentType: raw.contentType };
 }
 
-/**
- * Checks if a Content-Type indicates binary content that should not
- * be decoded as UTF-8 text.
- */
 function isBinaryContentType(ct: string): boolean {
   const lower = ct.toLowerCase();
-  return (
-    lower.includes("application/pdf") ||
-    lower.includes("application/x-pdf") ||
-    lower.includes("application/octet-stream")
-  );
+  return lower.includes("application/pdf") || lower.includes("application/x-pdf") || lower.includes("application/octet-stream");
 }
 
-async function fetchFromCache(
-  originalUrl: string,
-  signal: AbortSignal,
-): Promise<FetchResult> {
+async function fetchFromCache(originalUrl: string, signal: AbortSignal): Promise<FetchResult> {
   const encoded = encodeURIComponent(originalUrl);
   const headers = buildBrowserHeaders(originalUrl);
   const timeout = CACHE_FALLBACK_TIMEOUT_MS;
-
   const cacheUrls = [
     `https://webcache.googleusercontent.com/search?q=cache:${encoded}&strip=1`,
     `https://web.archive.org/web/2024/${originalUrl}`,
   ];
-
   for (const cacheUrl of cacheUrls) {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-
     const timer = new AbortController();
     const timerId = setTimeout(() => timer.abort(), timeout);
-
     try {
       const combined: AbortSignal =
-        typeof (AbortSignal as { any?: (sigs: AbortSignal[]) => AbortSignal })
-          .any === "function"
-          ? (AbortSignal as { any: (sigs: AbortSignal[]) => AbortSignal }).any([
-            signal,
-            timer.signal,
-          ])
+        typeof (AbortSignal as { any?: (sigs: AbortSignal[]) => AbortSignal }).any === "function"
+          ? (AbortSignal as { any: (sigs: AbortSignal[]) => AbortSignal }).any([signal, timer.signal])
           : timer.signal;
-
-      const res = await fetch(cacheUrl, {
-        method: "GET",
-        signal: combined,
-        headers,
-        redirect: "follow",
-      });
+      const res = await fetch(cacheUrl, { method: "GET", signal: combined, headers, redirect: "follow" });
       clearTimeout(timerId);
-
       if (res.ok) {
         const html = await res.text();
-        if (html.length > 500) {
-          return { html, finalUrl: originalUrl };
-        }
+        if (html.length > 500) return { html, finalUrl: originalUrl };
       }
     } catch {
       clearTimeout(timerId);
     }
   }
-
-  throw new Error(
-    `Failed to fetch ${originalUrl}: bot blocked, cache unavailable`,
-  );
+  throw new Error(`Failed to fetch ${originalUrl}: bot blocked, cache unavailable`);
 }
 
 export function safeHostname(url: string): string {
