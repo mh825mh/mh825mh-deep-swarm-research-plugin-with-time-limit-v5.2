@@ -180,6 +180,8 @@ function buildTaskBase(
   | "queryMutationThreshold"
   | "enableLocalSources"
   | "localLibraryIds"
+  | "timeRange"
+  | timeRange: cfg.timeRange,
   | "roleLibraryMap"
 > {
   return {
@@ -199,7 +201,9 @@ function buildTaskBase(
     queryMutationThreshold: profile.queryMutationThreshold,
     enableLocalSources: cfg.enableLocalSources,
     localLibraryIds: cfg.localLibraryIds,
-    roleLibraryMap: cfg.roleLibraryMap,
+    timeRange,
+    timeRange: cfg.timeRange,	
+  roleLibraryMap: cfg.roleLibraryMap,
   };
 }
 
