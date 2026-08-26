@@ -1,10 +1,11 @@
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import path from "node:path";
 import { CrawledSource } from "../types";
 
 const CACHE_DIR = path.resolve(process.cwd(), ".cache");
 const CACHE_FILE = path.join(CACHE_DIR, "visited-pages-v1.json");
-const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
 interface CachedVisitedEntry {
   visitedAt: string;
@@ -27,7 +28,8 @@ export function normalizeUrl(raw: string): string {
     for (const p of removeParams) {
       u.searchParams.delete(p);
     }
-    u.hostname = u.hostname.replace(/^www./, "");
+    // FIX: Escaped the dot in regex
+    u.hostname = u.hostname.replace(/^www\./, "");
     u.pathname = u.pathname.replace(/\/+$/, "") || "/";
     u.searchParams.sort();
     return u.toString();
@@ -37,7 +39,11 @@ export function normalizeUrl(raw: string): string {
 }
 
 function cloneSource<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
+  // FIX: Use spread/structuredClone for better performance over JSON.parse
+  if (typeof structuredClone === "function") {
+    return structuredClone(value);
+  }
+  return { ...value };
 }
 
 function normalizeStoredSource(source: CrawledSource): CrawledSource {
@@ -50,15 +56,22 @@ function normalizeStoredSource(source: CrawledSource): CrawledSource {
 
 export class VisitedPageCache {
   private readonly filePath: string;
+  private readonly maxAgeDays: number;
   private data: CacheFileShape = {
     version: 1,
     entries: {},
   };
+  private saveTimeout: NodeJS.Timeout | null = null;
 
-  constructor(filePath: string = CACHE_FILE) {
+  // Change the parameter to expect months, defaulting to 24
+  constructor(maxAgeMonths: number = 24, filePath: string = CACHE_FILE) {
+    // Convert months to days (approx 30 days per month)
+    this.maxAgeDays = Math.max(1, Math.floor(maxAgeMonths * 30));
     this.filePath = filePath;
     this.load();
     this.prune();
+    
+    console.log(`[CACHE] Initialized with max_age_days=${this.maxAgeDays} (${maxAgeMonths} months)`);
   }
 
   hasRecent(url: string): boolean {
@@ -66,7 +79,7 @@ export class VisitedPageCache {
     const entry = this.data.entries[key];
     if (!entry) return false;
     const age = Date.now() - new Date(entry.visitedAt).getTime();
-    if (!Number.isFinite(age) || age > THIRTY_DAYS_MS) {
+    if (!Number.isFinite(age) || age > this.maxAgeDays * DAY_IN_MS) {
       delete this.data.entries[key];
       this.save();
       return false;
@@ -96,7 +109,7 @@ export class VisitedPageCache {
     let changed = false;
     for (const [key, entry] of Object.entries(this.data.entries)) {
       const age = now - new Date(entry.visitedAt).getTime();
-      if (!Number.isFinite(age) || age > THIRTY_DAYS_MS) {
+      if (!Number.isFinite(age) || age > this.maxAgeDays * DAY_IN_MS) {
         delete this.data.entries[key];
         changed = true;
       }
@@ -106,12 +119,11 @@ export class VisitedPageCache {
     }
   }
 
-  // 👇 ADDED MISSING METHOD
   stats(): { entries: number; file: string; maxAgeDays: number } {
     return {
       entries: Object.keys(this.data.entries).length,
       file: this.filePath,
-      maxAgeDays: 30,
+      maxAgeDays: this.maxAgeDays,
     };
   }
 
@@ -134,11 +146,14 @@ export class VisitedPageCache {
   }
 
   private save(): void {
+    if (this.saveTimeout) clearTimeout(this.saveTimeout);
+    
     try {
       fs.mkdirSync(CACHE_DIR, { recursive: true });
       fs.writeFileSync(this.filePath, JSON.stringify(this.data, null, 2), "utf-8");
-    } catch {
-      // silent fail
+      console.log(`[CACHE] Saved ${Object.keys(this.data.entries).length} entries to disk.`);
+    } catch (err: any) {
+      console.error(`[CACHE] Failed to save visited cache: ${err.message}`);
     }
   }
 }

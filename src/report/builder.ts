@@ -10,6 +10,10 @@ import {
   CompiledReport,
   ReportSource,
   ContradictionEntry,
+  EvidenceCard,
+  ContextBudget,
+  EntityMetadata,
+  VerificationTier
 } from "../types";
 import { DIMENSIONS, detectCoveredDimensions } from "../planning/dimensions";
 import { synthesiseReport, detectContradictions } from "../synthesis/ai";
@@ -24,6 +28,8 @@ import {
   MAX_SOURCES_PER_DIMENSION,
   REPORT_SOURCE_PREVIEW_CHARS,
 } from "../constants";
+import { safeHostname } from "../net/http"; // <--- ADD THIS
+import { calculateContextBudget } from "../utils/tokens"; // <--- ADD THIS
 
 const INFO_MARKERS: ReadonlyArray<string> = [
   "is a",
@@ -189,6 +195,9 @@ export async function buildReport(
   enableAI: boolean,
   status: StatusFn,
   profile?: DepthProfile,
+  contextBudgetMode: "auto" | "conservative" | "manual" = "auto",
+  manualContextLimit: number = 8192,
+  maxSynthesisInputTokens: number = 18000
 ): Promise<CompiledReport> {
   const now = new Date().toUTCString();
 
@@ -260,14 +269,68 @@ export async function buildReport(
     };
     const p = profile ?? defaultProfile;
 
+    
+        // Extract evidence cards with Entity Metadata and Verification Tiers
+    const evidence: EvidenceCard[] = sources.map((s, i) => {
+      const domain = safeHostname(s.url);
+      const isOfficial = s.domainScore >= 90; // Heuristic: High domain score = official/publisher
+      
+      // Basic Entity Metadata Extraction (deterministic)
+      const metadata: EntityMetadata = {
+        author: s.title.split(" by ")[1] || undefined,
+        publisher: domain,
+        officialUrl: s.url,
+        riskSubdomain: s.text.toLowerCase().includes("cyber") ? "Cyber" : "General",
+      };
+
+      // Calculate Split Scores
+      const metadataConfidence = isOfficial ? 1.0 : 0.5;
+      const topicFit = Math.min(1.0, s.relevanceScore * 1.5);
+      const recommendationStrength = (metadataConfidence * 0.5) + (topicFit * 0.5);
+
+      // Determine Verification Tier
+      let tier: VerificationTier = "C"; // Default to Relevant Candidate
+      if (isOfficial && recommendationStrength > 0.7) tier = "A";
+      else if (recommendationStrength > 0.5) tier = "B";
+      if (s.relevanceScore < 0.2) tier = "REJECTED";
+
+      return {
+        id: `E${i+1}`,
+        entityType: s.tier === "academic" ? "article" : s.origin === "local" ? "local document" : "web",
+        title: s.title,
+        authorOrHost: domain,
+        canonicalUrl: s.url,
+        sourceTier: s.tier,
+        relevantClaim: s.description || s.text.slice(0, 100),
+        supportingExcerpt: s.text.slice(0, 300).replace(/\n+/g, " ").trim(),
+        confidence: s.relevanceScore > 0.6 ? "High" : s.relevanceScore > 0.3 ? "Medium" : "Low",
+        freshness: s.published,
+        worker: s.workerLabel,
+        verificationTier: tier,
+        metadataConfidence,
+        topicFit,
+        recommendationStrength,
+        entityMetadata: metadata
+      };
+    });
+
+       // Filter out REJECTED evidence before synthesis
+    const validEvidence = evidence.filter(e => e.verificationTier !== "REJECTED");
+
+    const budget = calculateContextBudget(
+      contextBudgetMode,
+      manualContextLimit,
+      maxSynthesisInputTokens
+    );
+
     const [synthResult, contradResult] = await Promise.all([
       synthesiseReport(
         topic,
-        sources,
+        validEvidence,
         coveredLabels,
         gapLabels,
         status,
-        p,
+        budget
       ).catch(() => null),
       detectContradictions(topic, sources, status, p).catch(
         () => [] as ContradictionEntry[],
@@ -276,7 +339,7 @@ export async function buildReport(
 
     aiSynthesis = synthResult;
     contradictions = contradResult;
-  }
+  } // <--- This brace closes the "if (enableAI && sources.length > 0)" block
 
   const header = buildHeader(
     topic,
@@ -554,6 +617,9 @@ function buildCitationIndex(sources: ReadonlyArray<ReportSource>): string {
   return [`## Citation Index`, ``, ...lines].join("\n");
 }
 
+  
+ 
+ 
 function esc(text: string): string {
   return text.replace(/\[/g, "\\[").replace(/\]/g, "\\]");
 }

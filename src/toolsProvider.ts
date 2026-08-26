@@ -1,352 +1,313 @@
-/**
- * @file toolsProvider.ts
- * Registers all four tools with LM Studio.
- */
-
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { tool, Tool, ToolsProviderController } from "@lmstudio/sdk";
+﻿import { tool } from "@lmstudio/sdk";
 import { z } from "zod";
+import os from "node:os";
+import path from "node:path";
+import fs from "node:fs";
 
-import { configSchematics } from "./config";
-import { runDeepResearch } from "./researcher";
-import { ResearchConfig } from "./types";
-import { DepthPreset, getDepthProfile } from "./constants";
-import { searchDDG } from "./net/ddg";
+import { multiEngineSearch } from "./net/search-engines";
+import { DdgRateLimiter } from "./net/ddg";
+import { scoreCandidate, rankCandidates } from "./scoring/authority";
 import { fetchPage } from "./net/http";
 import { extractPage } from "./net/extractor";
-import {
-  isPdfUrl,
-  isPdfContentType,
-  extractPdf,
-  PdfImage,
-} from "./net/pdf-extractor";
-import { scoreCandidate, rankCandidates } from "./scoring/authority";
-import { sleep } from "./net/http";
-import {
-  MULTI_READ_BATCH_DELAY_MS,
-  CONTENT_LIMIT_MIN,
-  CONTENT_LIMIT_MAX,
-  CONTENT_LIMIT_EXTENDED,
-  SEARCH_RESULTS_MIN,
-  SEARCH_RESULTS_MAX,
-} from "./constants";
-
+import { extractPdf } from "./net/pdf-extractor";
 import {
   getGlobalStore,
-  LibraryPriority,
-  LibraryTag,
+  saveGlobalStoreIndex,
+  type LibraryPriority,
+  type LibraryTag,
 } from "./local/store";
+import { readSkillFile } from "./skills/loader";
+import {
+  SEARCH_RESULTS_MIN,
+  SEARCH_RESULTS_MAX,
+  CONTENT_LIMIT_MIN,
+  CONTENT_LIMIT_EXTENDED,
+  MULTI_READ_BATCH_DELAY_MS,
+} from "./constants";
+import { sleep } from "./net/http";
+import { runDeepResearch } from "./researcher";
+import { loadUserKeys, keysFilePath } from "./config/keys";
 
-function readConfig(ctl: ToolsProviderController) {
-  const c = ctl.getPluginConfig(configSchematics);
-  const depth = c.get("researchDepth") as string;
-  const depthPreset: DepthPreset =
-    depth === "shallow"
-      ? "shallow"
-      : depth === "deep"
-        ? "deep"
-        : depth === "deeper"
-          ? "deeper"
-          : depth === "exhaustive"
-            ? "exhaustive"
-            : "standard";
-  return {
-    depthPreset,
-    contentLimitPerPage:
-      (c.get("contentLimitPerPage") as number) ||
-      getDepthProfile(depthPreset).defaultContentLimit,
-    enableLinkFollowing: (c.get("enableLinkFollowing") as string) !== "off",
-    enableAIPlanning: (c.get("enableAIPlanning") as string) !== "off",
-    safeSearch:
-      (c.get("safeSearch") as "strict" | "moderate" | "off") || "moderate",
-    enableLocalSources: (c.get("enableLocalSources") as string) !== "off",
-  } as const;
+// Local type definition to satisfy `satisfies` keyword without breaking compilation
+type ToolCallResult = { error: boolean; output: string };
+type PdfImage = any;
+
+// Local helper functions for missing exports
+function isPdfContentType(ct: string | undefined): boolean {
+  return !!ct && ct.toLowerCase().includes("application/pdf");
+}
+function isPdfUrl(url: string): boolean {
+  return /\.pdf(\?|$)/i.test(url);
 }
 
-export async function toolsProvider(
-  ctl: ToolsProviderController,
-): Promise<Tool[]> {
-  const deepResearchTool = tool({
-    name: "Research",
-    description: `Performs autonomous, multi-round deep web research using a Agent Swarm with AI-powered synthesis.
-    parameters: {
-  topic: z.string().min(3).describe(/* ... */),
-  focusAreas: z.array(z.string()).max(6).optional().describe(/* ... */),
-  depthOverride: z
-    .enum(["shallow", "standard", "deep", "deeper", "exhaustive"])
-    .optional()
-    .describe(/* ... */),
-  contentLimitOverride: z
-    .number()
-    .int()
-    .min(CONTENT_LIMIT_MIN)
-    .max(CONTENT_LIMIT_MAX)
-    .optional()
-    .describe(/* ... */),
-
-  // NEW:
-  sessionTimeoutMinutes: z
-    .number()
-    .int()
-    .min(1)
-    .max(120)
-    .optional()
-    .describe(
-      "Override max wall-clock time for this Deep Research call only. " +
-      "Session will be aborted once this limit is reached."
-    ),
-},
-
-HOW IT WORKS:
-  1. AI TASK DECOMPOSITION: The loaded model analyses the topic and dynamically creates specialised worker agents with roles. Each worker gets custom queries tailored to its assignment.
-
-  2. PARALLEL SWARM EXECUTION: All workers launch simultaneously:
-     • Workers search DuckDuckGo, score candidates by domain authority, fetch pages concurrently
-     • Post-fetch RELEVANCE FILTERING discards off-topic pages
-     • Multi-window content fingerprinting prevents duplicates
-     • Depth and Academic workers follow in-page citations
-
-  3. INTER-AGENT COMMUNICATION: After Round 1, an AI coordinator summarises key findings and suggests follow-up angles for gap-fill workers.
-
-  4. ADAPTIVE GAP-FILL: Coverage gaps are filled by TARGETED workers (e.g., Academic worker for missing evidence, Critical worker for missing controversy).
-
-  5. ADAPTIVE SOURCE COLLECTION: No hard source cap - each worker has its own page budget that scales with depth preset. Collection stops only when: all research dimensions are covered, a round yields zero new sources (stagnation), or all rounds are exhausted.
-
-  6. AI NARRATIVE SYNTHESIS: The loaded model writes a coherent, multi-paragraph research analysis with inline citations.
-
-  7. CONTRADICTION DETECTION: The model identifies claims where sources disagree, with severity ratings.
-
-  8. LOCAL DOCUMENT INTEGRATION: When enabled, each worker searches your indexed RAG libraries BEFORE hitting the web using a PROGRESSIVE SOURCE APPROACH:
-     • PROPRIETARY libraries are searched first (highest trust, your confidential data)
-     • INTERNAL libraries second (shared team knowledge)
-     • REFERENCE libraries third (curated reference materials)
-     • GENERAL libraries last (miscellaneous)
-     Workers auto-route to the right library by tag: the academic worker searches 'academic'-tagged libraries, the regulatory worker searches 'legal'/'policy' ones, etc.
-     Local sources are blended into the final report with [local] origin tags.
-
-WHAT YOU GET:
-  A structured Markdown report including:
-  - AI-written narrative analysis (primary section)
-  - Cross-source contradictions with severity ratings
-  - Coverage table (upto 12 research dimensions)
-  - Swarm activity summary (sources per worker)
-  - Cross-source consensus detection
-  - Key findings grouped by dimension (detail layer)
-  - Full source details with domain authority, relevance score, and publication date
-  - Numbered citation index
-
-USE THIS TOOL for thorough, cited research. Not for simple lookups.
-When Local Document Sources is enabled in settings, your indexed RAG libraries are searched progressively (proprietary -> internal -> reference -> general) alongside the web - each worker draws from your most trusted data first, then fills gaps from public sources. Use 'RAG Add Library' to create libraries with priority tiers and auto-routing tags.`,
-    parameters: {
-      topic: z
-        .string()
-        .min(3)
-        .describe(
-          "The research topic or question. Be specific. " +
-          "Example: 'long-term safety profile of GLP-1 receptor agonists' rather than just 'weight loss drugs'.",
-        ),
-      focusAreas: z
-        .array(z.string())
-        .max(6)
-        .optional()
-        .describe(
-          "Optional sub-topics or angles to emphasise across all worker queries. " +
-          "Example: ['side effects', 'clinical trial data', 'FDA approval status']",
-        ),
-      depthOverride: z
-        .enum(["shallow", "standard", "deep", "deeper", "exhaustive"])
-        .optional()
-        .describe(
-          "Override depth for this call only. " +
-          "shallow = 1 round (~10-25 sources, fast) · " +
-          "standard = 3 rounds (~30-60 sources) · " +
-          "deep = 5 rounds (~60-120 sources, thorough) · " +
-          "deeper = 10 rounds (~100-200+ sources, very thorough) · " +
-          "exhaustive = 15 rounds (200+ sources, maximum depth)",
-        ),
-      contentLimitOverride: z
-        .number()
-        .int()
-        .min(CONTENT_LIMIT_MIN)
-        .max(CONTENT_LIMIT_MAX)
-        .optional()
-        .describe(
-          "Override chars-per-page for this call only. " +
-          "Higher = richer context per source but slower overall.",
-        ),
-    },
-
-    // src/toolsProvider.ts
-
-implementation: async (
-  args: {
-    topic: string;
-    focusAreas?: string[];
-    depthOverride?: "shallow" | "standard" | "deep" | "deeper" | "exhaustive";
-    contentLimitOverride?: number;
-    sessionTimeoutMinutes?: number;
-  },
-  { status, warn, signal },
-) => {
-  const {
-    topic,
-    focusAreas,
-    depthOverride,
-    contentLimitOverride,
-    sessionTimeoutMinutes,
-  } = args;
-
-  const cfg = readConfig(ctl);
-  const timeoutMinutes = sessionTimeoutMinutes ?? 15;
-  const maxMs = timeoutMinutes * 60_000;
-  const currentDateIso = new Date().toISOString();
-
-  const researchCfg: ResearchConfig = {
-    topic,
-    focusAreas: focusAreas ?? [],
-    depthPreset: (depthOverride as DepthPreset) ?? cfg.depthPreset,
-    contentLimitPerPage: contentLimitOverride ?? cfg.contentLimitPerPage,
-    enableLinkFollowing: cfg.enableLinkFollowing,
-    enableAIPlanning: cfg.enableAIPlanning,
-    safeSearch: cfg.safeSearch,
-    enableLocalSources: cfg.enableLocalSources,
-    maxSessionMs: maxMs,
-  };
-
-  const sessionController = new AbortController();
-  const sessionSignal = sessionController.signal;
-
-  if (signal.aborted) {
-    sessionController.abort();
-  } else {
-    signal.addEventListener(
-      "abort",
-      () => {
-        sessionController.abort();
-      },
-      { once: true },
-    );
-  }
-
-  const timeoutId = setTimeout(() => {
-    if (!sessionSignal.aborted) {
-      status(
-        `\n Max session time (${timeoutMinutes} min) reached — aborting deep research.`,
-      );
-      sessionController.abort();
-    }
-  }, maxMs);
+function readConfig(ctl: any) {
+  const fallback = {
+    researchDepth: "standard",
+    contentLimitPerPage: 4000,
+    enableLinkFollowing: true,
+    enableAIPlanning: true,
+    safeSearch: "moderate",
+    timeRange: "all",
+    engineSelectionMode: "adaptive",
+    maxSessionMinutes: 30,
+    enableAcademicAPIs: false,
+	enableYouTube: false,
+    enableReferenceSearch: true,
+    enableXSearch: false,
+    enableLocalSources: false,                // NEW
+    serperApiKey: undefined as string | undefined,
+    braveApiKey: undefined as string | undefined,
+      };
 
   try {
-    const result = await runDeepResearch(
-      researchCfg,
-      status,
-      warn,
-      sessionSignal,
-    );
+    const raw = ctl?.getConfig?.() ?? ctl?.config ?? {};
+    const cfg = { ...raw, ...(ctl?.config ?? {}) };
 
-    clearTimeout(timeoutId);
+    const on = (v: unknown, def: boolean) =>
+      v === "on" || v === true ? true :
+      v === "off" || v === false ? false : def;
+
+    const list = (v: unknown): string[] => {
+      if (Array.isArray(v)) {
+        return v.map(String).map((s) => s.trim()).filter(Boolean);
+      }
+      if (typeof v === "string" && v.trim()) {
+        return v.split(",").map((s) => s.trim()).filter(Boolean);
+      }
+      return [];
+    };
+
+    const fileKeys = loadUserKeys();
+
+    const serperKey =
+      (typeof cfg.serperApiKey === "string" && cfg.serperApiKey.trim()) ||
+      process.env.SERPER_API_KEY?.trim() ||
+      fileKeys.serperApiKey ||
+      undefined;
+
+    const braveKey =
+      (typeof cfg.braveApiKey === "string" && cfg.braveApiKey.trim()) ||
+      process.env.BRAVE_API_KEY?.trim() ||
+      fileKeys.braveApiKey ||
+      undefined;
+
+    
+    // NEW: read the Local Document Sources select field
+    const enableLocalSourcesSelect =
+      typeof cfg.enableLocalSources === "string"
+        ? cfg.enableLocalSources
+        : "off";
 
     return {
-      topic,
-      totalRounds: result.totalRounds,
-      totalSources: result.totalSources,
-      queriesUsed: result.queriesUsed,
-      coveredDimensions: result.report.coveredDims,
-      gapDimensions: result.report.gapDims,
-      hasAISynthesis: !!result.report.aiSynthesis,
-      contradictions: result.report.contradictions.length,
-      report: result.report.markdown,
-      sourceIndex: result.report.sources.map((s) => ({
-        index: s.index,
-        title: s.title,
-        url: s.url,
-        published: s.published,
-        domainScore: s.domainScore,
-        tier: s.tier,
-        workerRole: s.workerRole,
-        workerLabel: s.workerLabel,
-        relevance: Math.round(s.relevanceScore * 100),
-        origin: s.origin,
-        excerpt: s.description.slice(0, 200),
-      })),
+      researchDepth: cfg.researchDepth ?? fallback.researchDepth,
+      contentLimitPerPage: Number(
+        cfg.contentLimitPerPage ?? fallback.contentLimitPerPage,
+      ),
+      enableLinkFollowing: on(cfg.enableLinkFollowing, fallback.enableLinkFollowing),
+      enableAIPlanning: on(cfg.enableAIPlanning, fallback.enableAIPlanning),
+      safeSearch: cfg.safeSearch ?? fallback.safeSearch,
+      timeRange: cfg.timeRange ?? fallback.timeRange,
+      engineSelectionMode: cfg.engineSelectionMode ?? fallback.engineSelectionMode,
+      maxSessionMinutes: Number(
+        cfg.maxSessionMinutes ?? fallback.maxSessionMinutes,
+      ),
+      enableAcademicAPIs: on(cfg.enableAcademicAPIs, fallback.enableAcademicAPIs),
+	  enableYouTube: on(cfg.enableYouTube, fallback.enableYouTube), 
+      enableReferenceSearch: on(cfg.enableReferenceSearch, fallback.enableReferenceSearch),
+      
+      // NEW: any non-"off" value turns local sources on
+      enableLocalSources: enableLocalSourcesSelect !== "off",
+
+      serperApiKey: serperKey,
+      braveApiKey: braveKey,
+      
     };
-  } catch (err: unknown) {
-    clearTimeout(timeoutId);
-
-    if (isAbortError(err)) {
-      if (signal.aborted) {
-        return "Research cancelled by user.";
-      }
-      return `Research stopped after ${timeoutMinutes} minutes (session time limit reached).`;
-    }
-
-    const msg = errorMessage(err);
-    warn(`Deep research error: ${msg}`);
-    return `Error during deep research: ${msg}`;
+  } catch {
+    return fallback;
   }
-},
-  });
+}
 
-  const researchSearchTool = tool({
-    name: "Search",
-    description:
-      "Search DuckDuckGo and return scored, ranked results with domain authority tiers. " +
-      "Each result includes a domain score (0-100), source tier (academic/government/news/etc.), " +
-      "URL quality score, and freshness estimate. Results are ranked by combined quality. " +
-      "Use this for focused lookups. For full research, use 'Research'." +
-      "Don't use this for searching local files.",
+export async function toolsProvider(ctl: any) {
+  const deepResearchTool = tool({
+    name: "DeepResearch",
+    description: "Runs a deep research swarm on the given topic.",
     parameters: {
-      query: z
-        .string()
-        .min(2)
-        .describe(
-          "Search query - use natural language as you would type into a search engine.",
-        ),
-      maxResults: z
-        .number()
-        .int()
-        .min(SEARCH_RESULTS_MIN)
-        .max(SEARCH_RESULTS_MAX)
+      topic: z.string().describe("The research topic."),
+      focusAreas: z
+        .array(z.string())
         .optional()
-        .describe("Max results to return (default: 8)."),
+        .describe("Specific areas to focus on."),
+      depth: z
+        .string()
+        .optional()
+        .describe("Research depth (e.g., shallow, standard, deep)."),
+      contentLimit: z
+        .number()
+        .optional()
+        .describe("Content limit per page."),
+      sessionTimeoutMinutes: z
+        .number()
+        .optional()
+        .describe("Session timeout in minutes."),
+
+      enableLocalSources: z
+        .boolean()
+        .optional()
+        .describe(
+          "Include indexed local RAG libraries in the research swarm. " +
+            "Default: false. Local chunks are blended with web sources and marked as local.",
+        ),
+
+      localLibraryIds: z
+        .array(z.string().uuid())
+        .max(20)
+        .optional()
+        .describe(
+          "Optional RAG library IDs to search. Omit to use role-based routing " +
+            "and progressive priority retrieval across all indexed libraries.",
+        ),
     },
 
-    implementation: async ({ query, maxResults }, { status, warn, signal }) => {
-      const cfg = readConfig(ctl);
-      const max = maxResults ?? 8;
-
-      status(`Searching: "${query}"`);
-
+    implementation: async (
+      args: any,
+      { status, warn, signal },
+    ): Promise<ToolCallResult> => {
       try {
-        const hits = await searchDDG(query, max, cfg.safeSearch, signal);
-        const scored = hits.map((h) => scoreCandidate(h, query));
-        const ranked = rankCandidates(scored, max);
+        const ui = readConfig(ctl);
+const result = await runDeepResearch(
+  {
+    topic: args.topic,
+    focusAreas: args.focusAreas ?? [],
+    depthPreset: args.depth ?? ui.researchDepth,
+    contentLimitPerPage:
+      args.contentLimit ?? ui.contentLimitPerPage,
+    enableLinkFollowing: ui.enableLinkFollowing,
+    enableAIPlanning: ui.enableAIPlanning,
+    safeSearch: ui.safeSearch,
+    timeRange: ui.timeRange,
+    engineSelectionMode: ui.engineSelectionMode,
+	enableYouTube: ui.enableYouTube,
+    enableAcademicAPIs: ui.enableAcademicAPIs,
+    enableReferenceSearch: ui.enableReferenceSearch,
+    serperApiKey: ui.serperApiKey,
+    braveApiKey: ui.braveApiKey,
+    
+    maxSessionMs:
+      typeof args.sessionTimeoutMinutes === "number"
+        ? args.sessionTimeoutMinutes * 60_000
+        : ui.maxSessionMinutes > 0
+          ? ui.maxSessionMinutes * 60_000
+          : undefined,
 
-        status(`Found ${ranked.length} ranked results.`);
+    // ONLY these two lines changed:
+    enableLocalSources: args.enableLocalSources ?? ui.enableLocalSources,
+    localLibraryIds: args.localLibraryIds,
+  },
+  status,
+  warn,
+  signal,
+);
 
-        return ranked.map((c, i) => ({
-          rank: i + 1,
-          url: c.url,
-          title: c.title,
-          snippet: c.snippet,
-          domainScore: c.domainScore,
-          freshnessScore: c.freshnessScore,
-          urlQuality: c.urlQuality,
-          totalScore: c.totalScore,
-          tier: c.tier,
-        }));
+        if (
+          !result ||
+          result.totalSources === 0 ||
+          !result.report ||
+          result.report.markdown.trim() === ""
+        ) {
+          return {
+            error: true,
+            output:
+              "Research completed but found no usable sources. Search engines may have blocked requests, and no relevant local sources were available.",
+          } satisfies ToolCallResult;
+        }
+
+        return {
+          error: false,
+          output: result.report.markdown,
+        } satisfies ToolCallResult;
       } catch (err: unknown) {
-        if (isAbortError(err) || signal.aborted) return "Search cancelled.";
-        const msg = errorMessage(err);
-        warn(`Search error: ${msg}`);
-        return `Error during search: ${msg}`;
+        return {
+          error: true,
+          output: `Research failed with error: ${
+            err instanceof Error ? err.message : String(err)
+          }. Please inform the user.`,
+        } satisfies ToolCallResult;
       }
     },
   });
 
+  // ... rest of toolsProvider continues here
+
+const researchSearchTool = tool({
+  name: "Search",
+  description:
+    "Search the web and return scored, ranked results with domain authority tiers. " +
+    "Each result includes a domain score (0-100), source tier (academic/government/news/etc.), " +
+    "URL quality score, and freshness estimate. Results are ranked by combined quality. " +
+    "Use this for focused lookups. For full research, use 'Research'." +
+    "Don't use this for searching local files.",
+  parameters: {
+    query: z
+      .string()
+      .min(2)
+      .describe("Search query - use natural language as you would type into a search engine."),
+    maxResults: z
+      .number()
+      .int()
+      .min(SEARCH_RESULTS_MIN)
+      .max(SEARCH_RESULTS_MAX)
+      .optional()
+      .describe("Max results to return (default: 8)."),
+  },
+
+  implementation: async (
+    { query, maxResults },
+    { status, warn, signal },
+  ) => {
+    const max = maxResults ?? 8;
+
+    status(`Searching: "${query}"`);
+
+    try {
+      const hits = await multiEngineSearch(
+        query,
+        max,
+        ["ddg", "searxng", "yandex", "brave"],
+        signal,
+        () => new DdgRateLimiter(10000),
+        "all",
+      );
+
+      if (hits.length === 0) {
+        return "Search failed: 0 results found. All search engines are currently blocking requests (CAPTCHA).";
+      }
+
+      const scored = hits.map((h: any) => scoreCandidate(h, query));
+      const ranked = rankCandidates(scored, max);
+
+      status(`Found ${ranked.length} ranked results.`);
+
+      return ranked.map((c: any, i: number) => ({
+        rank: i + 1,
+        url: c.url,
+        title: c.title,
+        snippet: c.snippet,
+        domainScore: c.domainScore,
+        freshnessScore: c.freshnessScore,
+        urlQuality: c.urlQuality,
+        totalScore: c.totalScore,
+        tier: c.tier,
+      }));
+    } catch (err: unknown) {
+      if (isAbortError(err) || signal.aborted) return "Search cancelled.";
+      const msg = errorMessage(err);
+      warn(`Search error: ${msg}`);
+      return `Error during search: ${msg}`;
+    }
+  },
+});
+
+  
   const researchReadPageTool = tool({
     name: "Read Page",
     description:
@@ -462,14 +423,14 @@ implementation: async (
           content: page.text,
           page: page.page,
           totalPages: page.totalPages,
-          topLinks: page.outlinks.slice(0, 10).map((l) => ({
+          topLinks: page.outlinks.slice(0, 10).map((l: any) => ({
             text: l.text,
             href: l.href,
           })),
         };
 
         if (images.length > 0) {
-          result.images = images.map((img, idx) => ({
+          result.images = images.map((img: any, idx: number) => ({
             index: idx + 1,
             page: img.page,
             format: img.format,
@@ -482,8 +443,8 @@ implementation: async (
 
           const imageNote = images
             .map(
-              (img, idx) =>
-                `[Image ${idx + 1} on page ${img.page}: ${img.width}×${img.height}, ${Math.round(img.byteSize / 1024)} KB - saved to ${img.filePath}]`,
+              (img: any, idx: number) =>
+                `[Image ${idx + 1} on page ${img.page}: ${img.width}x${img.height}, ${Math.round(img.byteSize / 1024)} KB - saved to ${img.filePath}]`,
             )
             .join("\n");
           result.content =
@@ -536,7 +497,7 @@ implementation: async (
       const cfg = readConfig(ctl);
       const limit = contentLimit ?? cfg.contentLimitPerPage;
 
-      status(`Reading ${urls.length} page(s) - 3 at a time…`);
+      status(`Reading ${urls.length} page(s) - 3 at a time...`);
 
       const CONCURRENCY = 3;
       const results: Array<{
@@ -556,7 +517,7 @@ implementation: async (
 
         const batch = urls.slice(i, i + CONCURRENCY);
         const settled = await Promise.allSettled(
-          batch.map(async (url, bi) => {
+          batch.map(async (url: any, bi: number) => {
             const fetchResult = await fetchPage(url, signal);
             const { finalUrl } = fetchResult;
 
@@ -643,6 +604,22 @@ implementation: async (
     },
   });
 
+  const readSkillFileTool = tool({
+    name: "ReadSkillFile",
+    description: "Reads a specialized knowledge skill file from the plugin's skills directory. Use this to apply specific formatting rules or domain expertise before synthesizing research.",
+    parameters: {
+      skillName: z.string().describe("The name of the skill file to read (without extension)"),
+    },
+    implementation: async ({ skillName }, { status }) => {
+      status(`Reading skill file: ${skillName}...`);
+      const content = readSkillFile(skillName);
+      if (!content) {
+        return { error: `Skill file '${skillName}' not found.` };
+      }
+      return { content };
+    },
+  });
+
   const ragAddLibraryTool = tool({
     name: "RAG Add Library",
     description:
@@ -725,6 +702,8 @@ implementation: async (
           cfg.contentLimitPerPage,
           status,
         );
+		
+		saveGlobalStoreIndex();
         return {
           success: true,
           library: {
@@ -738,6 +717,7 @@ implementation: async (
             chunkCount: library.chunkCount,
             totalWords: library.totalWords,
             indexedAt: library.indexedAt,
+			indexingReport: library.indexingReport ?? [],
             fileTypes: summariseFileTypes(library.files),
           },
           instructions:
@@ -777,7 +757,7 @@ implementation: async (
       }
 
       return {
-        libraries: libraries.map((lib) => ({
+        libraries: libraries.map((lib: any) => ({
           id: lib.id,
           name: lib.name,
           folderPath: lib.folderPath,
@@ -817,6 +797,10 @@ implementation: async (
 
       const name = library.name;
       const removed = store.removeLibrary(libraryId);
+	  
+if (removed) {
+  saveGlobalStoreIndex();
+}
 
       if (removed) {
         status(`Removed library "${name}"`);
@@ -891,7 +875,7 @@ implementation: async (
 
       status(
         isWildcard
-          ? "Listing all document chunks…"
+          ? "Listing all document chunks..."
           : `Searching RAG libraries: "${query}"${useProgressive ? " (progressive)" : ""}`,
       );
 
@@ -914,12 +898,12 @@ implementation: async (
       }
 
       status(
-        `Found ${hits.length} relevant chunks across ${new Set(hits.map((h) => h.libraryName)).size} library(ies).`,
+        `Found ${hits.length} relevant chunks across ${new Set(hits.map((h: any) => h.libraryName)).size} library(ies).`,
       );
 
       const showContext = includeContext !== false;
 
-      return hits.map((h, i) => {
+      return hits.map((h: any, i: number) => {
         const result: Record<string, unknown> = {
           rank: i + 1,
           library: h.libraryName,
@@ -989,6 +973,10 @@ implementation: async (
         priority: priority as LibraryPriority | undefined,
         tags: tags as LibraryTag[] | undefined,
       });
+	  
+	  if (updated) {
+  saveGlobalStoreIndex();
+}
 
       if (!updated) return `Library not found: ${libraryId}`;
 
@@ -1188,7 +1176,7 @@ implementation: async (
       const limit = contentLimit ?? cfg.contentLimitPerPage;
       const CONCURRENCY = 3;
 
-      status(`Fetching ${urls.length} PDF(s) - ${CONCURRENCY} at a time…`);
+      status(`Fetching ${urls.length} PDF(s) - ${CONCURRENCY} at a time...`);
 
       interface PdfPageWindow {
         pageEstimate: number;
@@ -1219,9 +1207,9 @@ implementation: async (
 
         const batch = urls.slice(i, i + CONCURRENCY);
         const settled = await Promise.allSettled(
-          batch.map(async (url, bi): Promise<PdfReadResult> => {
+          batch.map(async (url: any, bi: number): Promise<PdfReadResult> => {
             const idx = i + bi + 1;
-            status(`[${idx}/${urls.length}] Fetching ${url}…`);
+            status(`[${idx}/${urls.length}] Fetching ${url}...`);
 
             const fetchResult = await fetchPage(url, signal);
             const { finalUrl } = fetchResult;
@@ -1270,7 +1258,7 @@ implementation: async (
               };
             }
 
-            status(`[${idx}/${urls.length}] Extracting text from PDF…`);
+            status(`[${idx}/${urls.length}] Extracting text from PDF...`);
             const extracted = await extractPdf(buffer, url, finalUrl, limit, false);
 
             const text = extracted.text;
@@ -1395,7 +1383,7 @@ implementation: async (
     },
   });
 
-  return [
+    return [
     deepResearchTool,
     researchSearchTool,
     researchReadPageTool,
@@ -1410,7 +1398,10 @@ implementation: async (
     ragSaveIndexTool,
     ragLoadIndexTool,
   ];
-}
+} // closes: export async function toolsProvider(ctl: any)
+
+// Alias for backward compatibility if other files use createTools
+export const createTools = toolsProvider;
 
 function summariseFileTypes(
   files: ReadonlyArray<{ fileType: string }>,

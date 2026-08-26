@@ -19,6 +19,15 @@ export async function runDeepResearch(
   signal: AbortSignal,
 ): Promise<ResearchResult> {
   const profile = getDepthProfile(cfg.depthPreset);
+
+  if (cfg.enableLocalSources) {
+    const scope = cfg.localLibraryIds?.length
+      ? `${cfg.localLibraryIds.length} selected local librar${cfg.localLibraryIds.length === 1 ? "y" : "ies"}`
+      : "all indexed local libraries";
+
+    status(`Local Document Sources enabled: searching ${scope}.`);
+  }
+
   const swarmResult = await runSwarm(cfg, profile, status, warn, signal);
 
   if (signal.aborted && swarmResult.sources.length === 0) {
@@ -37,9 +46,9 @@ export async function runDeepResearch(
     };
   }
 
-  status("\n Building research report…");
+  status("\nBuilding research report…");
 
-  const report = await buildReport(
+    const report = await buildReport(
     cfg.topic,
     swarmResult.sources,
     swarmResult.queriesUsed,
@@ -49,6 +58,9 @@ export async function runDeepResearch(
     cfg.enableAIPlanning,
     status,
     profile,
+    cfg.contextBudgetMode ?? "auto",
+    cfg.manualContextLimit ?? 8192,
+    cfg.maxSynthesisInputTokens ?? 18000
   );
 
   status(

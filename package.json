@@ -1,58 +1,22 @@
-<<<<<<< HEAD
-{
-  "name": "lms-plugin-deep-swarm-research-with-time-limit",
-  "version": "5",
-  "description": "LM Studio plugin for Deep Research with time limit- autonomously searches, reads, and synthesizes multi-source web research in one tool call.",
-  "main": "dist/index.js",
-  "scripts": {
-    "build": "tsc",
-    "dev": "tsc && lms dev",
-    "push": "lms push"
-  },
-  "author": "mh825",
-  "license": "MIT",
-  "dependencies": {
-    "@lmstudio/sdk": "^1.5.0",
-    "@mozilla/readability": "^0.6.0",
-    "jsdom": "^29.0.1",
-    "pdf-parse": "^2.4.5",
-    "turndown": "^7.2.0",
-    "zod": "^3.25.76"
-  },
-  "devDependencies": {
-    "@types/jsdom": "^28.0.3",
-    "@types/node": "^25.5.0",
-    "@types/pdf-parse": "^1.1.5",
-    "@types/turndown": "^5.0.5",
-    "typescript": "^5.9.3"
-  }
-=======
 {
   "name": "lms-plugin-deep-swarm-research",
-  "version": "1.0.4",
-  "description": "LM Studio plugin for Deep Research - autonomously searches, reads, and synthesizes multi-source web research in one tool call.",
+  "version": "5.2.0",
+  "description": "Deep Swarm Research Plugin for LM Studio",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc && lms dev",
-    "push": "lms push"
+    "build": "tsc"
   },
-  "author": "user",
-  "license": "MIT",
   "dependencies": {
     "@lmstudio/sdk": "^1.5.0",
-    "@mozilla/readability": "^0.6.0",
-    "jsdom": "^29.0.1",
-    "pdf-parse": "^2.4.5",
-    "turndown": "^7.2.0",
-    "zod": "^3.25.76"
+    "@mozilla/readability": "^0.5.0",
+    "@types/jsdom": "^28.0.3",
+    "@types/node": "^26.1.1",
+    "@types/turndown": "^5.0.6",
+    "got-scraping": "^4.2.1",
+    "jsdom": "^24.0.0",
+    "turndown": "^7.2.0"
   },
   "devDependencies": {
-    "@types/jsdom": "^28.0.3",
-    "@types/node": "^25.5.0",
-    "@types/pdf-parse": "^1.1.5",
-    "@types/turndown": "^5.0.5",
     "typescript": "^5.9.3"
   }
->>>>>>> 1c46ad3332f675b64d3ea1c67c702e7103352dcb
 }

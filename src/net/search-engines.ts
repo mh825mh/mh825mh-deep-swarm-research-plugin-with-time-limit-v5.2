@@ -1,372 +1,241 @@
-import { SearchHit } from "../types";
-import { buildBrowserHeaders, sleep } from "./http";
-import { DdgRateLimiter } from "./ddg";
+// src/net/search-engines.ts
+import type { SearchHit } from "../types";
+import { DdgRateLimiter, searchDDG } from "./ddg";
+import { fetchPage } from "./http";
+import {
+  searchArxiv,
+  searchBraveApi,
+  searchCrossref,
+  searchGdelt,
+  searchOpenAlex,
+  searchReferenceSites,
+  searchSerper,
+} from "./api-engines";
 
-export type SearchEngine = "ddg" | "brave" | "scholar" | "searxng" | "mojeek" | "yandex";
+export type SearchEngine =
+  | "ddg"
+  | "brave"
+  | "google"
+  | "scholar"
+  | "searxng"
+  | "mojeek"
+  | "yandex"
+  | "serper"
+  | "brave-api"
+  | "openalex"
+  | "crossref"
+  | "arxiv"
+  | "gdelt"
+  | "reference"
+  | "youtube";
 
-const SEARXNG_INSTANCES: ReadonlyArray<string> = [
-  "https://search.sapti.me",
-  "https://searx.tiekoetter.com",
-  "https://search.bus-hit.me",
-  "https://priv.au",
-];
+export interface SearchEngineOptions {
+  readonly serperApiKey?: string;
+  readonly braveApiKey?: string;
+}
 
-const YANDEX_HOSTS: ReadonlyArray<string> = [
-  "https://yandex.com",
-  "https://yandex.eu",
-];
+export type LimiterFactory = () => DdgRateLimiter;
 
-function stripTags(html: string): string {
-  return html
+function stripHtml(value: string): string {
+  return value
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<[^>]+>/g, " ")
-    .replace(/&/g, "&")
-    .replace(/</g, "<")
-    .replace(/>/g, ">")
-    .replace(/"/g, '"')
-    .replace(/'/g, "'")
-    .replace(/'/g, "'")
-    .replace(/ /g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function parseBraveResults(html: string, maxResults: number): SearchHit[] {
-  const hits: SearchHit[] = [];
-  const seen = new Set<string>();
-  const snippetBlockRe = /<div[^>]+class="[^"]*snippet[^"]*"[^>]*>([\s\S]*?)(?=<div[^>]+class="[^"]*snippet|<footer)/gi;
-  const linkRe = /href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/i;
-  const descRe = /<div[^>]+class="[^"]*snippet-description[^"]*"[^>]*>([\s\S]*?)<\/div>/i;
-  let blockMatch: RegExpExecArray | null;
-  while (hits.length < maxResults && (blockMatch = snippetBlockRe.exec(html)) !== null) {
-    const block = blockMatch[1];
-    const lm = linkRe.exec(block);
-    if (!lm) continue;
-    const rawUrl = lm[1].trim();
-    if (!rawUrl.startsWith("http") || seen.has(rawUrl)) continue;
-    if (/brave.com|search.brave/i.test(rawUrl)) continue;
-    seen.add(rawUrl);
-    const title = stripTags(lm[2]).trim();
-    const descMatch = descRe.exec(block);
-    const snippet = descMatch ? stripTags(descMatch[1]).trim() : title;
-    hits.push({ url: rawUrl, title, snippet });
-  }
-  if (hits.length === 0) {
-    const fallbackRe = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*class="[^"]*heading[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
-    let m: RegExpExecArray | null;
-    while (hits.length < maxResults && (m = fallbackRe.exec(html)) !== null) {
-      const rawUrl = m[1].trim();
-      if (seen.has(rawUrl) || /brave.com/i.test(rawUrl)) continue;
-      seen.add(rawUrl);
-      hits.push({ url: rawUrl, title: stripTags(m[2]).trim(), snippet: "" });
-    }
-  }
-  return hits;
-}
-
-function parseScholarResults(html: string, maxResults: number): SearchHit[] {
-  const hits: SearchHit[] = [];
-  const seen = new Set<string>();
-  const blockRe = /<div[^>]+class="[^"]*gs_r[^"]*"[^>]*>([\s\S]*?)(?=<div[^>]+class="[^"]*gs_r|$)/gi;
-  const titleLinkRe = /<h3[^>]*>[\s\S]*?<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i;
-  const snippetRe = /<div[^>]+class="gs_rs"[^>]*>([\s\S]*?)<\/div>/i;
-  let blockMatch: RegExpExecArray | null;
-  while (hits.length < maxResults && (blockMatch = blockRe.exec(html)) !== null) {
-    const block = blockMatch[1];
-    const tm = titleLinkRe.exec(block);
-    if (!tm) continue;
-    let rawUrl = tm[1].trim();
-    const urlParam = /[?&]url=(https?[^&]+)/.exec(rawUrl);
-    if (urlParam) rawUrl = decodeURIComponent(urlParam[1]);
-    if (!rawUrl.startsWith("http") || seen.has(rawUrl)) continue;
-    if (/scholar.google|google.com\/scholar/i.test(rawUrl)) continue;
-    seen.add(rawUrl);
-    const title = stripTags(tm[2]).trim();
-    const sm = snippetRe.exec(block);
-    const snippet = sm ? stripTags(sm[1]).trim() : title;
-    hits.push({ url: rawUrl, title, snippet });
-  }
-  return hits;
-}
-
-function parseMojeekResults(html: string, maxResults: number): SearchHit[] {
-  const hits: SearchHit[] = [];
-  const seen = new Set<string>();
-  const linkRe = /<a[^>]+class="ob"[^>]* href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-  const snippetRe = /<p[^>]+class="s"[^>]*>([\s\S]*?)<\/p>/gi;
-  const links: Array<{ url: string; title: string }> = [];
-  const snippets: string[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = linkRe.exec(html)) !== null) {
-    const rawUrl = m[1].trim();
-    if (rawUrl.startsWith("http") && !/mojeek.com/i.test(rawUrl)) {
-      links.push({ url: rawUrl, title: stripTags(m[2]).trim() });
-    }
-  }
-  while ((m = snippetRe.exec(html)) !== null) {
-    snippets.push(stripTags(m[1]).trim());
-  }
-  for (let i = 0; i < links.length && hits.length < maxResults; i++) {
-    const { url, title } = links[i];
-    if (seen.has(url)) continue;
-    seen.add(url);
-    hits.push({ url, title, snippet: snippets[i] ?? title });
-  }
-  return hits;
-}
-
-function parseYandexResults(html: string, maxResults: number): SearchHit[] {
-  const hits: SearchHit[] = [];
-  const seen = new Set<string>();
-  const blockRe = /<li[^>]+class="[^"]*serp-item[^"]*"[^>]*>([\s\S]*?)<\/li>/gi;
-  const titleLinkRe = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*class="[^"]*(?:OrganicTitle-Link|Link)[^"]*"[^>]*>([\s\S]*?)<\/a>/i;
-  const fallbackLinkRe = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/i;
-  const snippetRe = /<div[^>]+class="[^"]*(?:OrganicText|text-container|Text)[^"]*"[^>]*>([\s\S]*?)<\/div>/i;
-  let m: RegExpExecArray | null;
-  while (hits.length < maxResults && (m = blockRe.exec(html)) !== null) {
-    const block = m[1];
-    const titleMatch = titleLinkRe.exec(block) ?? fallbackLinkRe.exec(block);
-    if (!titleMatch) continue;
-    const rawUrl = titleMatch[1].trim();
-    if (!rawUrl.startsWith("http")) continue;
-    if (/yandex\./i.test(rawUrl)) continue;
-    if (seen.has(rawUrl)) continue;
-    seen.add(rawUrl);
-    const title = stripTags(titleMatch[2]).trim();
-    const snippetMatch = snippetRe.exec(block);
-    const snippet = snippetMatch ? stripTags(snippetMatch[1]).trim() : title;
-    if (!title && !snippet) continue;
-    hits.push({ url: rawUrl, title, snippet });
-  }
-  return hits;
-}
-
-export async function searchBrave(
-  query: string,
-  maxResults: number,
-  signal: AbortSignal,
-  limiter?: DdgRateLimiter,
-  _timeRange: string = "all",
-): Promise<ReadonlyArray<SearchHit>> {
-  if (limiter) await limiter.acquire();
-  if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+function decodeDuckDuckGoUrl(value: string): string {
   try {
-    const url = `https://search.brave.com/search?q=${encodeURIComponent(query)}&source=web`;
-    const res = await fetch(url, {
-      signal,
-      headers: {
-        ...buildBrowserHeaders(url),
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      },
-    });
-    if (!res.ok) return [];
-    const html = await res.text();
-    return parseBraveResults(html, maxResults);
-  } catch {
-    return [];
+    const parsed = new URL(value, "https://duckduckgo.com");
+    if (parsed.hostname === "duckduckgo.com" || parsed.hostname.endsWith(".duckduckgo.com")) {
+      const target = parsed.searchParams.get("uddg");
+      if (target) return decodeURIComponent(target);
+    }
+  } catch {}
+  return value;
+}
+
+function normaliseUrl(value: string): string {
+  return decodeDuckDuckGoUrl(value).trim().replace(/#.*$/, "").replace(/\/$/, "").toLowerCase();
+}
+
+function dedupeHits(hits: ReadonlyArray<SearchHit>, maxResults: number): ReadonlyArray<SearchHit> {
+  const result: SearchHit[] = [];
+  const seen = new Set<string>();
+  for (const hit of hits) {
+    const url = decodeDuckDuckGoUrl(hit.url);
+    const key = normaliseUrl(url);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push({ ...hit, url, title: hit.title?.trim() || url, snippet: hit.snippet?.trim() || "" });
+    if (result.length >= maxResults) break;
+  }
+  return result;
+}
+
+function parseSearchLinks(html: string, source: string, maxResults: number): ReadonlyArray<SearchHit> {
+  const hits: SearchHit[] = [];
+  const seen = new Set<string>();
+  const linkRe = /<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let match: RegExpExecArray | null;
+
+  while (hits.length < maxResults && (match = linkRe.exec(html)) !== null) {
+    const href = decodeDuckDuckGoUrl(match[1]);
+    const title = stripHtml(match[2]);
+    if (!href.startsWith("http")) continue;
+    if (!title || title.length < 2) continue;
+    const key = normaliseUrl(href);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    hits.push({ url: href, title, snippet: "", discoveredBy: source });
+  }
+  return hits;
+}
+
+// Serialized queue to prevent concurrent hits and ban patterns
+class EngineQueue {
+  private chain: Promise<any> = Promise.resolve();
+  private lastRequest = 0;
+  private readonly minDelay: number;
+
+  constructor(minDelayMs: number = 4000) {
+    this.minDelay = minDelayMs;
+  }
+
+  async run<T>(task: () => Promise<T>): Promise<T> {
+    // Enforce minimum delay between sequential requests
+    const now = Date.now();
+    const elapsed = now - this.lastRequest;
+    if (elapsed < this.minDelay) {
+      const jitter = Math.random() * 1000; // add up to 1s of jitter to look human
+      await new Promise((resolve) => setTimeout(resolve, this.minDelay - elapsed + jitter));
+    }
+
+    const runTask = this.chain.then(() => task());
+    // Update chain to catch errors so one failure doesn't break the queue permanently
+    this.chain = runTask.then(() => undefined, () => undefined);
+    this.lastRequest = Date.now();
+    return runTask;
   }
 }
 
-export async function searchGoogleScholar(
-  query: string,
-  maxResults: number,
-  signal: AbortSignal,
-  limiter?: DdgRateLimiter,
-): Promise<ReadonlyArray<SearchHit>> {
-  if (limiter) await limiter.acquire();
-  if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-  try {
-    const url = `https://scholar.google.com/scholar?q=${encodeURIComponent(query)}&hl=en&num=${Math.min(maxResults, 10)}`;
-    const res = await fetch(url, { signal, headers: buildBrowserHeaders(url) });
-    if (!res.ok) return [];
-    const html = await res.text();
-    return parseScholarResults(html, maxResults);
-  } catch {
-    return [];
-  }
-}
+const engineQueues: Record<string, EngineQueue> = {
+  ddg: new EngineQueue(4000),
+  brave: new EngineQueue(3500),
+  google: new EngineQueue(5000), // Google is strict, needs 5s
+  scholar: new EngineQueue(5000),
+  searxng: new EngineQueue(3000),
+  mojeek: new EngineQueue(3000),
+  yandex: new EngineQueue(4000),
+  youtube: new EngineQueue(3000),
+  reference: new EngineQueue(2000),
+};
 
-export async function searchSearXNG(
-  query: string,
-  maxResults: number,
-  signal: AbortSignal,
-  limiter?: DdgRateLimiter,
-  timeRange: string = "all",
-): Promise<ReadonlyArray<SearchHit>> {
-  if (limiter) await limiter.acquire();
+async function searchHtmlEndpoint(url: string, source: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
   if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-  for (const instance of SEARXNG_INSTANCES) {
-    if (signal.aborted) break;
+  
+  // Run the fetch inside the engine's specific queue
+  const queue = engineQueues[source] || new EngineQueue(4000);
+  return queue.run(async () => {
     try {
-      const timeParam = timeRange !== "all" ? `&time_range=${timeRange}` : "";
-      const url = `${instance}/search?q=${encodeURIComponent(query)}&format=json&categories=general&language=en${timeParam}`;
-      const res = await fetch(url, {
-        signal,
-        headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
-      });
-      if (!res.ok) {
-        await sleep(randomBetween(120, 260));
-        continue;
-      }
-      const data = (await res.json()) as {
-        results?: Array<{ url?: string; title?: string; content?: string }>;
-      };
-      if (!Array.isArray(data.results)) {
-        await sleep(randomBetween(120, 260));
-        continue;
-      }
-      const hits: SearchHit[] = [];
-      const seen = new Set<string>();
-      for (const r of data.results) {
-        if (hits.length >= maxResults) break;
-        if (!r.url || !r.url.startsWith("http")) continue;
-        if (seen.has(r.url)) continue;
-        seen.add(r.url);
-        hits.push({
-          url: r.url,
-          title: (r.title ?? "").trim(),
-          snippet: (r.content ?? r.title ?? "").trim(),
-        });
-      }
-      if (hits.length > 0) return hits;
-    } catch {
-      await sleep(randomBetween(120, 260));
-      continue;
-    }
-  }
-  return [];
-}
-
-export async function searchMojeek(
-  query: string,
-  maxResults: number,
-  signal: AbortSignal,
-  limiter?: DdgRateLimiter,
-): Promise<ReadonlyArray<SearchHit>> {
-  if (limiter) await limiter.acquire();
-  if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-  try {
-    const url = `https://www.mojeek.com/search?q=${encodeURIComponent(query)}&fmt=html`;
-    const res = await fetch(url, { signal, headers: buildBrowserHeaders(url) });
-    if (!res.ok) return [];
-    const html = await res.text();
-    return parseMojeekResults(html, maxResults);
-  } catch {
-    return [];
-  }
-}
-
-export async function searchYandex(
-  query: string,
-  maxResults: number,
-  signal: AbortSignal,
-  limiter?: DdgRateLimiter,
-  _timeRange: string = "all",
-): Promise<ReadonlyArray<SearchHit>> {
-  if (limiter) await limiter.acquire();
-  if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-  for (const host of YANDEX_HOSTS) {
-    if (signal.aborted) break;
-    try {
-      const url = `${host}/search/?text=${encodeURIComponent(query)}&lr=10393`;
-      const res = await fetch(url, {
-        signal,
-        headers: {
-          ...buildBrowserHeaders(url),
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        },
-      });
-      if (!res.ok) {
-        await sleep(randomBetween(140, 280));
-        continue;
-      }
-      const html = await res.text();
-      const hits = parseYandexResults(html, maxResults);
-      if (hits.length > 0) return hits;
-    } catch {
-      await sleep(randomBetween(140, 280));
-      continue;
-    }
-  }
-  return [];
-}
-
-function randomBetween(min: number, max: number): number {
-  return Math.floor(min + Math.random() * (max - min + 1));
-}
-
-async function runEngine(
-  engine: SearchEngine,
-  query: string,
-  maxResultsPerEngine: number,
-  signal: AbortSignal,
-  getLimiter: () => DdgRateLimiter,
-  timeRange: string,
-): Promise<ReadonlyArray<SearchHit>> {
-  const limiter = getLimiter();
-  switch (engine) {
-    case "searxng":
-      return searchSearXNG(query, maxResultsPerEngine, signal, limiter, timeRange);
-    case "yandex":
-      return searchYandex(query, maxResultsPerEngine, signal, limiter, timeRange);
-    case "brave":
-      return searchBrave(query, maxResultsPerEngine, signal, limiter, timeRange);
-    case "scholar":
-      return searchGoogleScholar(query, maxResultsPerEngine, signal, limiter);
-    case "mojeek":
-      return searchMojeek(query, maxResultsPerEngine, signal, limiter);
-    case "ddg":
-    default:
+      const response = await fetchPage(url, signal);
+      return parseSearchLinks(response.html, source, maxResults);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") throw error;
       return [];
+    }
+  });
+}
+
+async function searchBrave(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
+  return searchHtmlEndpoint(`https://search.brave.com/search?q=${encodeURIComponent(query)}`, "brave", maxResults, signal);
+}
+
+async function searchGoogle(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
+  return searchHtmlEndpoint(`https://www.google.com/search?q=${encodeURIComponent(query)}&udm=14&hl=en&num=${maxResults}`, "google", maxResults, signal);
+}
+
+async function searchGoogleScholar(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
+  return searchHtmlEndpoint(`https://scholar.google.com/scholar?q=${encodeURIComponent(query)}`, "scholar", maxResults, signal);
+}
+
+async function searchSearxng(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
+  const endpoints = [
+    `https://searx.be/search?q=${encodeURIComponent(query)}&format=html`,
+    `https://search.ononoki.org/search?q=${encodeURIComponent(query)}&format=html`,
+  ];
+  for (const endpoint of endpoints) {
+    const hits = await searchHtmlEndpoint(endpoint, "searxng", maxResults, signal);
+    if (hits.length > 0) return hits;
   }
+  return [];
+}
+
+async function searchMojeek(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
+  return searchHtmlEndpoint(`https://www.mojeek.com/search?q=${encodeURIComponent(query)}`, "mojeek", maxResults, signal);
+}
+
+async function searchYandex(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
+  return searchHtmlEndpoint(`https://yandex.com/search/?text=${encodeURIComponent(query)}`, "yandex", maxResults, signal);
+}
+
+async function searchYouTube(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
+  return searchHtmlEndpoint(`https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`, "youtube", maxResults, signal);
 }
 
 export async function multiEngineSearch(
   query: string,
-  maxResultsPerEngine: number,
+  maxResults: number,
   engines: ReadonlyArray<SearchEngine>,
   signal: AbortSignal,
-  getLimiter: () => DdgRateLimiter,
-  timeRange: string = "all",
+  limiterFactory: LimiterFactory = () => new DdgRateLimiter(4000),
+  timeRange = "all",
+  options: SearchEngineOptions = {},
 ): Promise<ReadonlyArray<SearchHit>> {
-  const ordered = Array.from(new Set(engines)).filter((e) => e !== "ddg");
-  const priority: SearchEngine[] = ["yandex", "searxng", "brave", "mojeek", "scholar"];
-  ordered.sort((a, b) => priority.indexOf(a) - priority.indexOf(b));
+  if (signal.aborted) throw new DOMException("Aborted", "AbortError");
 
-  const primary = ordered.filter((e) => e === "searxng" || e === "yandex");
-  const secondary = ordered.filter((e) => e !== "searxng" && e !== "yandex");
+  const selectedEngines = Array.from(new Set(engines.filter((engine): engine is SearchEngine => !!engine)));
+  if (selectedEngines.length === 0 || maxResults <= 0) return [];
 
-  const seen = new Set<string>();
-  const merged: SearchHit[] = [];
-  const mergeHits = (hits: ReadonlyArray<SearchHit>) => {
-    for (const hit of hits) {
-      if (seen.has(hit.url)) continue;
-      seen.add(hit.url);
-      merged.push(hit);
-    }
-  };
+  const perEngineLimit = Math.max(1, Math.ceil(maxResults / selectedEngines.length));
 
-  for (const engine of primary) {
-    if (signal.aborted) break;
-    try {
-      const hits = await runEngine(engine, query, maxResultsPerEngine, signal, getLimiter, timeRange);
-      mergeHits(hits);
-    } catch {
-      // ignore
-    }
-  }
+  const results = await Promise.all(
+    selectedEngines.map(async (engine): Promise<ReadonlyArray<SearchHit>> => {
+      try {
+        switch (engine) {
+          case "ddg": {
+            const limiter = limiterFactory();
+            return searchDDG(query, perEngineLimit, "moderate", signal, limiter, timeRange);
+          }
+          case "brave": return searchBrave(query, perEngineLimit, signal);
+          case "google": return searchGoogle(query, perEngineLimit, signal);
+          case "scholar": return searchGoogleScholar(query, perEngineLimit, signal);
+          case "searxng": return searchSearxng(query, perEngineLimit, signal);
+          case "mojeek": return searchMojeek(query, perEngineLimit, signal);
+          case "yandex": return searchYandex(query, perEngineLimit, signal);
+          case "youtube": return searchYouTube(query, perEngineLimit, signal);
+          case "serper": return options.serperApiKey ? searchSerper(query, perEngineLimit, options.serperApiKey, signal, limiterFactory()) : [];
+          case "brave-api": return options.braveApiKey ? searchBraveApi(query, perEngineLimit, options.braveApiKey, signal, limiterFactory()) : [];
+          case "openalex": return searchOpenAlex(query, perEngineLimit, signal);
+          case "crossref": return searchCrossref(query, perEngineLimit, signal);
+          case "arxiv": return searchArxiv(query, perEngineLimit, signal);
+          case "gdelt": return searchGdelt(query, perEngineLimit, signal);
+          case "reference": return searchReferenceSites(query, perEngineLimit, signal);
+          default: return [];
+        }
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") throw error;
+        return [];
+      }
+    }),
+  );
 
-  const enoughPrimaryCoverage = merged.length >= Math.max(8, Math.ceil(maxResultsPerEngine * 1.5));
-  if (!enoughPrimaryCoverage && secondary.length > 0 && !signal.aborted) {
-    const secondaryResults = await Promise.all(
-      secondary.map((engine) =>
-        runEngine(engine, query, maxResultsPerEngine, signal, getLimiter, timeRange).catch(() => [] as SearchHit[]),
-      ),
-    );
-    for (const hits of secondaryResults) {
-      mergeHits(hits);
-    }
-  }
-  return merged;
+  return dedupeHits(results.flat(), maxResults);
 }

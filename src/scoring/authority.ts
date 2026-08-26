@@ -233,7 +233,9 @@ function computeUrlQuality(url: string): number {
   return Math.max(0, Math.min(100, score));
 }
 
-const CURRENT_YEAR = new Date().getFullYear();
+function getCurrentYear(): number {
+  return new Date().getFullYear();
+}
 
 function estimateFreshness(
   url: string,
@@ -243,16 +245,16 @@ function estimateFreshness(
   const m = /\/(20\d{2})\//.exec(url);
   if (m) {
     const year = parseInt(m[1], 10);
-    if (year === CURRENT_YEAR) return 100;
-    if (year === CURRENT_YEAR - 1) return 85;
-    if (year === CURRENT_YEAR - 2) return 70;
-    if (year === CURRENT_YEAR - 3) return 55;
-    return Math.max(10, 55 - (CURRENT_YEAR - year - 3) * 8);
+    if (year === getCurrentYear()) return 100;
+    if (year === getCurrentYear() - 1) return 85;
+    if (year === getCurrentYear() - 2) return 70;
+    if (year === getCurrentYear() - 3) return 55;
+    return Math.max(10, 55 - (getCurrentYear() - year - 3) * 8);
   }
 
   const combined = `${title} ${snippet}`.toLowerCase();
-  if (combined.includes(String(CURRENT_YEAR))) return 85;
-  if (combined.includes(String(CURRENT_YEAR - 1))) return 70;
+  if (combined.includes(String(getCurrentYear()))) return 85;
+  if (combined.includes(String(getCurrentYear() - 1))) return 70;
   if (/latest|new\s|recent|just\s|breaking/i.test(combined)) return 65;
 
   return 50;

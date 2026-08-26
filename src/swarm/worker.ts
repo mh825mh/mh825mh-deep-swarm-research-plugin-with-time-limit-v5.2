@@ -1,3 +1,16 @@
+// src/swarm/worker.ts
+import { LlmCallManager } from "../utils/llm";
+import { logLlmDiagnostics } from "../utils/tokens";
+import { extractYouTubeTranscript } from "../net/youtube-extractor";
+import {
+  searchSerper,
+  searchBraveApi,
+  searchOpenAlex,
+  searchCrossref,
+  searchArxiv,
+  searchGdelt,
+  searchReferenceSites,
+} from "../net/api-engines";
 import {
   searchDDG,
   searchDDGPaginated,
@@ -5,6 +18,7 @@ import {
   sharedDdgLimiter,
 } from "../net/ddg";
 import { multiEngineSearch, SearchEngine } from "../net/search-engines";
+import { SearchHealthTracker } from "./health";
 import { fetchPage, sleep } from "../net/http";
 import {
   extractPage,
@@ -30,6 +44,7 @@ import {
   StatusFn,
   WarnFn,
   SearchHit,
+  ExtractedPage,
 } from "../types";
 import { harvestLocalSources } from "../local/search";
 import {
@@ -91,6 +106,7 @@ export interface SharedCrawlState {
   isRecentlyVisited(url: string): boolean;
   getCachedSource(url: string): CrawledSource | null;
   markVisitedPersistent(source: CrawledSource): void;
+  addWebCacheDocument(source: CrawledSource): void;
   getMetricsSnapshot(): Readonly<CrawlMetrics>;
   mergeMetrics(delta: Partial<CrawlMetrics>): void;
 }
@@ -100,7 +116,7 @@ const MUTATION_STRATEGIES: ReadonlyArray<(q: string) => string> = [
   (q) => `${q} explained`,
   (q) => `${q} guide overview`,
   (q) => `${q} research`,
-  (q) => q.split(" ").slice(0, 5).join(" "),
+  (q) => q.split(" ").slice(0, 10).join(" "),
   (q) => q.replace(/\b(how|what|why|when)\b/gi, " ").trim(),
 ];
 
@@ -109,6 +125,10 @@ type SearchHitLike = {
   title: string;
   snippet: string;
   query: string;
+  discoveredBy?: string;
+  requestedRoute?: string; // <--- ADD THIS
+  actualBackend?: string;  // <--- ADD THIS
+  resultDomain?: string;   // <--- ADD THIS
 };
 
 function isRateLimitError(msg: string): boolean {
@@ -122,38 +142,14 @@ function isRateLimitError(msg: string): boolean {
 
 function zeroMetrics(): CrawlMetrics {
   return {
-    ddgQueries: 0,
-    ddgHits: 0,
-    mutatedQueriesTried: 0,
-    mutationAccepted: 0,
-    mutationHits: 0,
-    extraEngineQueries: 0,
-    extraEngineHits: 0,
-    rawHits: 0,
-    dedupedHits: 0,
-    rankedCandidates: 0,
-    fetchCandidates: 0,
-    fetchAttempts: 0,
-    fetchFailures: 0,
-    acceptedSources: 0,
-    skippedLowWordCount: 0,
-    skippedOffTopic: 0,
-    skippedVeryOffTopic: 0,
-    skippedDuplicateContent: 0,
-    skippedVisited: 0,
-    skippedDomainCap: 0,
-    skippedAvoided: 0,
-    skippedBlacklisted: 0,
-    cacheChecks: 0,
-    cacheHits: 0,
-    cacheAccepted: 0,
-    cacheRejectedDuplicate: 0,
-    cacheRejectedOffTopic: 0,
-    cacheRejectedLowWordCount: 0,
-    cacheWrites: 0,
-    followedLinks: 0,
-    crossWorkerDiscoveriesUsed: 0,
-    localSourcesAccepted: 0,
+    ddgQueries: 0, ddgHits: 0, mutatedQueriesTried: 0, mutationAccepted: 0,
+    mutationHits: 0, extraEngineQueries: 0, extraEngineHits: 0, rawHits: 0,
+    dedupedHits: 0, rankedCandidates: 0, fetchCandidates: 0, fetchAttempts: 0,
+    fetchFailures: 0, acceptedSources: 0, skippedLowWordCount: 0, skippedOffTopic: 0,
+    skippedVeryOffTopic: 0, skippedDuplicateContent: 0, skippedVisited: 0, skippedDomainCap: 0,
+    skippedAvoided: 0, skippedBlacklisted: 0, cacheChecks: 0, cacheHits: 0, cacheAccepted: 0,
+    cacheRejectedDuplicate: 0, cacheRejectedOffTopic: 0, cacheRejectedLowWordCount: 0,
+    cacheWrites: 0, followedLinks: 0, crossWorkerDiscoveriesUsed: 0, localSourcesAccepted: 0,
   };
 }
 
@@ -165,6 +161,8 @@ export async function runWorker(
   warn: WarnFn,
   topicKws: ReadonlyArray<string> = [],
   limiter: DdgRateLimiter = sharedDdgLimiter,
+  health: SearchHealthTracker,
+  llmManager: LlmCallManager
 ): Promise<WorkerResult> {
   const sources: CrawledSource[] = [];
   const errors: string[] = [];
@@ -172,21 +170,14 @@ export async function runWorker(
   const roleTag = `[${task.label}]`;
   const metrics = zeroMetrics();
 
-  status(
-    `${roleTag} Starting - ${task.queries.length} queries, budget=${task.pageBudget}, links=${task.followLinks ? "on" : "off"}`,
-  );
+  status(`${roleTag} Starting - ${task.queries.length} queries, budget=${task.pageBudget}, links=${task.followLinks ? "on" : "off"}`);
 
   if (task.enableLocalSources) {
     const localBudget = Math.max(2, Math.ceil(task.pageBudget * 0.3));
     const localSources = harvestLocalSources(
-      task.queries,
-      task.role,
-      task.label,
-      localBudget,
-      task.contentLimit,
-      task.localLibraryIds,
-      task.roleLibraryMap,
+      task.queries, task.role, task.label, localBudget, task.contentLimit, task.localLibraryIds, task.roleLibraryMap,
     );
+
     if (localSources.length > 0) {
       for (const src of localSources) {
         state.addVisited(src.url);
@@ -194,99 +185,82 @@ export async function runWorker(
         sources.push(src);
       }
       metrics.localSourcesAccepted += localSources.length;
-      status(
-        `${roleTag} Local sources: ${localSources.length} chunks from document collections`,
-      );
+      status(`${roleTag} Local sources: ${localSources.length} chunks`);
     }
   }
 
   const allHits: SearchHitLike[] = [];
-  let hitRateLimit = false;
+  let ddgBlocked = false;
 
   for (const query of task.queries) {
     if (signal.aborted) break;
 
+    // 9. QUERY PLANNING RULES - Reject bad queries
+    const qLower = query.toLowerCase();
+    if (qLower.includes("definition and overview") || qLower.includes("how does") || qLower.includes("what is") || qLower.length > 100) {
+      warn(`[Query Quality] Rejected invalid query template: "${query}"`);
+      continue;
+    }
+
     let ddgHits: ReadonlyArray<SearchHit> = [];
     let effectiveHitCount = 0;
-    metrics.ddgQueries++;
 
-    try {
-      if (task.searchPages > 1) {
-        ddgHits = await searchDDGPaginated(
-          query,
-          task.searchResultsPerQuery,
-          task.searchPages,
-          task.safeSearch,
-          signal,
-          limiter,
-          task.timeRange ?? "all",
-        );
-      } else {
-        ddgHits = await searchDDG(
-          query,
-          task.searchResultsPerQuery,
-          task.safeSearch,
-          signal,
-          limiter,
-          task.timeRange ?? "all",
-        );
+        // 4. DDG FAILURE DEFINITION & HEALTH TRACKING
+    if (task.extraEngines.includes("ddg") && health.isDdgAvailable()) {
+      metrics.ddgQueries++;
+      try {
+        if (task.searchPages > 1) {
+          ddgHits = await searchDDGPaginated(query, task.searchResultsPerQuery, task.searchPages, task.safeSearch, signal, limiter, task.timeRange ?? "all");
+        } else {
+          ddgHits = await searchDDG(query, task.searchResultsPerQuery, task.safeSearch, signal, limiter, task.timeRange ?? "all");
+        }
+
+        // 5. Make DDG health deterministic: Require >= 3 unique non-blocked results
+        if (ddgHits.length < 3) {
+          throw new Error("INVALID_RESULT_SET (< 3 results)");
+        }
+
+        health.recordDdgSuccess(ddgHits.length);
+        metrics.ddgHits += ddgHits.length;
+        effectiveHitCount = ddgHits.length;
+
+        // Track Attribution
+        for (const h of ddgHits) {
+          let domain = "";
+          try { domain = new URL(h.url).hostname.replace(/^www\./, ""); } catch {}
+          allHits.push({ 
+            ...h, 
+            query, 
+            requestedRoute: "DDG",
+            actualBackend: "DDG",
+            resultDomain: domain
+          });
+        }
+        
+        queriesExecuted.push(query);
+        status(`${roleTag} DDG: "${query}" -> ${ddgHits.length} results`);
+      } catch (err: unknown) {
+        if (isAbortError(err)) break;
+        const msg = errorMessage(err);
+        health.recordDdgFailure(msg);
+        warn(`${roleTag} DDG failed (${health.ddg.consecutiveFailures}/5): ${msg}`);
       }
-
-      metrics.ddgHits += ddgHits.length;
-      effectiveHitCount = ddgHits.length;
-
-      for (const h of ddgHits) {
-        allHits.push({ ...h, query });
-      }
-      queriesExecuted.push(query);
-
-      status(
-        `${roleTag} DDG: "${query}" -> ${ddgHits.length} results${task.searchPages > 1 ? ` (${task.searchPages}pg)` : ""}`,
-      );
-    } catch (err: unknown) {
-      if (isAbortError(err)) break;
-      const msg = errorMessage(err);
-      if (isRateLimitError(msg)) {
-        hitRateLimit = true;
-        warn(`${roleTag} RATE LIMIT (429) DETECTED! Pausing worker for 20s...`);
-        await sleep(20000);
-      } else {
-        warn(`${roleTag} DDG failed: "${query}" - ${msg}`);
-      }
-      errors.push(`ddg:"${query}": ${msg}`);
     }
 
-    if (ddgHits.length === 0 && !signal.aborted && !hitRateLimit) {
-      warn(
-        `${roleTag} SILENT BLOCK DETECTED (0 hits)! DDG is likely serving CAPTCHAs. Pausing worker for 20s...`,
-      );
-      hitRateLimit = true;
-      await sleep(20000);
-    }
-
+    // Query Mutation (LLM)
     if (
       ddgHits.length < task.queryMutationThreshold &&
       !signal.aborted &&
-      !hitRateLimit
+      !ddgBlocked &&
+      llmManager.canCall(task.id)
     ) {
-      const contextSnippets = allHits
-        .filter((h) => h.query === query)
-        .slice(0, 3)
-        .map((h) => h.snippet);
-
-      const llmMutated = await getLLMQueryMutation(
-        query,
-        contextSnippets,
-        signal,
-      );
-
-      const mutationsToTry = [
-        llmMutated,
-        ...MUTATION_STRATEGIES.map((s) => s(query)),
-      ].filter((m): m is string => !!m && m !== query);
-
-      let bestMutation: { query: string; hits: ReadonlyArray<SearchHit> } | null =
-        null;
+      llmManager.recordCall(task.id);
+      
+      const contextSnippets = allHits.filter((h) => h.query === query).slice(0, 3).map((h) => h.snippet);
+      const llmMutated = await getLLMQueryMutation(query, contextSnippets, signal);
+      
+      const mutationsToTry = [llmMutated, ...MUTATION_STRATEGIES.map((s) => s(query))].filter((m): m is string => !!m && m !== query);
+      let bestMutation: { query: string; hits: ReadonlyArray<SearchHit> } | null = null;
       const baseline = mutationQuality(ddgHits);
 
       for (const mutated of mutationsToTry) {
@@ -295,88 +269,51 @@ export async function runWorker(
         metrics.ddgQueries++;
 
         try {
-          const mutHits = await searchDDG(
-            mutated,
-            task.searchResultsPerQuery,
-            task.safeSearch,
-            signal,
-            limiter,
-            task.timeRange ?? "all",
-          );
+          const mutHits = await searchDDG(mutated, task.searchResultsPerQuery, task.safeSearch, signal, limiter, task.timeRange ?? "all");
           metrics.ddgHits += mutHits.length;
 
           if (mutationQuality(mutHits) > baseline) {
-            if (
-              !bestMutation ||
-              mutationQuality(mutHits) > mutationQuality(bestMutation.hits)
-            ) {
+            if (!bestMutation || mutationQuality(mutHits) > mutationQuality(bestMutation.hits)) {
               bestMutation = { query: mutated, hits: mutHits };
             }
           }
         } catch (err) {
           const msg = errorMessage(err);
           if (isRateLimitError(msg)) {
-            hitRateLimit = true;
-            warn(`${roleTag} Mutation RATE LIMIT (429)! Pausing for 15s...`);
-            await sleep(15000);
+            ddgBlocked = true;
+            warn(`${roleTag} Mutation RATE LIMIT (429)! Falling back...`);
             break;
           }
-          warn(`${roleTag} Mutation failed: "${mutated}" - ${msg}`);
         }
       }
 
       if (bestMutation) {
         metrics.mutationAccepted++;
         metrics.mutationHits += bestMutation.hits.length;
-
-        for (const h of bestMutation.hits) {
-          allHits.push({ ...h, query: bestMutation.query });
-        }
+        for (const h of bestMutation.hits) allHits.push({ ...h, query: bestMutation.query });
         queriesExecuted.push(bestMutation.query);
-        effectiveHitCount = Math.max(
-          effectiveHitCount,
-          bestMutation.hits.length,
-        );
-
-        status(
-          `${roleTag} Mutation accepted: "${bestMutation.query.slice(0, 40)}..." -> ${bestMutation.hits.length} results`,
-        );
+        effectiveHitCount = Math.max(effectiveHitCount, bestMutation.hits.length);
       }
+    } else if (llmManager.canCall(task.id) === false) {
+      warn(`${roleTag} LLM call budget exhausted, skipping mutation.`);
     }
 
-    const shouldUseExtraEngines =
-      task.extraEngines.length > 0 &&
-      !signal.aborted &&
-      !hitRateLimit &&
-      (effectiveHitCount < Math.ceil(task.searchResultsPerQuery * 0.6) ||
-        task.role === "academic" ||
-        task.role === "primary" ||
-        task.role === "regulatory");
+    // Fallback to SearxNG or API if DDG is dead or hit 0
+    const shouldUseExtraEngines = task.extraEngines.length > 0 && !signal.aborted && (ddgBlocked || effectiveHitCount < Math.ceil(task.searchResultsPerQuery * 0.6) || task.role === "academic" || task.role === "primary" || task.role === "regulatory");
 
     if (shouldUseExtraEngines) {
       metrics.extraEngineQueries++;
       try {
         const extraHits = await multiEngineSearch(
-          query,
-          Math.min(task.searchResultsPerQuery, 8),
+          query, Math.min(task.searchResultsPerQuery, 8),
           task.extraEngines as ReadonlyArray<SearchEngine>,
-          signal,
-          () => limiter,
-          task.timeRange ?? "all",
+          signal, () => limiter, task.timeRange ?? "all",
+          { serperApiKey: (task as any).serperApiKey, braveApiKey: (task as any).braveApiKey }
         );
-
         metrics.extraEngineHits += extraHits.length;
-
-        for (const h of extraHits) {
-          allHits.push({ ...h, query });
-        }
-
-        if (extraHits.length > 0) {
-          status(`${roleTag} -> ${extraHits.length} extra results`);
-        }
-      } catch {
-        // non-fatal
-      }
+        for (const h of extraHits) allHits.push({ ...h, query });
+        if (extraHits.length > 0) status(`${roleTag} -> ${extraHits.length} extra results`);
+      } catch {}
     }
   }
 
@@ -385,27 +322,18 @@ export async function runWorker(
   if (signal.aborted || allHits.length === 0) {
     metrics.acceptedSources = sources.length;
     state.mergeMetrics(metrics);
-    status(
-      `${roleTag} Summary raw_hits=${metrics.rawHits} accepted=${metrics.acceptedSources} cache_hits=${metrics.cacheHits}`,
-    );
-    return {
-      taskId: task.id,
-      role: task.role,
-      label: task.label,
-      sources,
-      queries: queriesExecuted,
-      errors,
-    };
+    return { taskId: task.id, role: task.role, label: task.label, sources, queries: queriesExecuted, errors };
   }
 
   const deduped = deduplicateByUrl(allHits);
   metrics.dedupedHits = deduped.length;
 
-  const scored = deduped.map((h) => scoreCandidate(h, h.query));
-  const filtered = task.preferredTiers
-    ? scored.filter((c) => task.preferredTiers!.includes(c.tier))
-    : scored;
-
+  const scored = deduped.map((h) => {
+    const sc = scoreCandidate(h, h.query);
+    return { ...sc, discoveredBy: h.discoveredBy };
+  });
+  
+  const filtered = task.preferredTiers ? scored.filter((c) => task.preferredTiers!.includes(c.tier)) : scored;
   const poolSize = task.pageBudget * task.candidatePoolMultiplier;
   const ranked = rankCandidates(filtered.length > 0 ? filtered : scored, poolSize);
   const candidates = capCandidatesPerHost(ranked, 2);
@@ -413,51 +341,16 @@ export async function runWorker(
   metrics.rankedCandidates = candidates.length;
   metrics.fetchCandidates = candidates.length;
 
-  status(
-    `${roleTag} ${candidates.length} candidates ranked (from ${allHits.length} hits across ${task.extraEngines.length + 1} engine(s))`,
-  );
-
-  await fetchBatch(
-    candidates,
-    task,
-    state,
-    signal,
-    status,
-    warn,
-    sources,
-    errors,
-    roleTag,
-    topicKws,
-    metrics,
-  );
-
+  await fetchBatch(candidates, task, state, signal, status, warn, sources, errors, roleTag, topicKws, metrics, llmManager);
+  
   if (task.followLinks && sources.length > 0 && sources.length < task.pageBudget) {
     for (let depth = 1; depth <= task.linkCrawlDepth; depth++) {
       if (sources.length >= task.pageBudget || signal.aborted) break;
-
-      const budget = Math.min(
-        task.pageBudget - sources.length,
-        task.maxLinksToFollow,
-      );
+      const budget = Math.min(task.pageBudget - sources.length, task.maxLinksToFollow);
       if (budget <= 0) break;
 
       const sourcesForLinks = depth === 1 ? sources : sources.slice(-budget * 2);
-      const newCount = await followLinks(
-        sourcesForLinks,
-        task,
-        state,
-        signal,
-        status,
-        warn,
-        sources,
-        errors,
-        roleTag,
-        budget,
-        topicKws,
-        depth,
-        metrics,
-      );
-
+      const newCount = await followLinks(sourcesForLinks, task, state, signal, status, warn, sources, errors, roleTag, budget, topicKws, depth, metrics, llmManager);
       metrics.followedLinks += newCount;
       if (newCount === 0) break;
     }
@@ -469,53 +362,11 @@ export async function runWorker(
     }
   }
 
-  if (sources.length < task.pageBudget && !signal.aborted) {
-    const remaining = task.pageBudget - sources.length;
-    const discoveries = state.drainDiscoveries(Math.min(5, remaining));
-
-    if (discoveries.length > 0) {
-      metrics.crossWorkerDiscoveriesUsed += discoveries.length;
-      status(`${roleTag} Picking up ${discoveries.length} cross-worker discoveries`);
-
-      const discCandidates = discoveries.map((d) =>
-        scoreCandidate(
-          { url: d.url, title: d.title, snippet: "" },
-          task.queries[0] ?? "",
-        ),
-      );
-
-      await fetchBatch(
-        discCandidates,
-        {
-          ...task,
-          pageBudget: sources.length + discoveries.length,
-        },
-        state,
-        signal,
-        status,
-        warn,
-        sources,
-        errors,
-        roleTag,
-        topicKws,
-        metrics,
-      );
-    }
-  }
-
   metrics.acceptedSources = sources.length;
   state.mergeMetrics(metrics);
-
   status(`✅ ${roleTag} Mission Complete - ${sources.length} high-quality sources collected!`);
 
-  return {
-    taskId: task.id,
-    role: task.role,
-    label: task.label,
-    sources,
-    queries: queriesExecuted,
-    errors,
-  };
+  return { taskId: task.id, role: task.role, label: task.label, sources, queries: queriesExecuted, errors };
 }
 
 async function fetchBatch(
@@ -530,54 +381,33 @@ async function fetchBatch(
   tag: string,
   topicKws: ReadonlyArray<string>,
   metrics: CrawlMetrics,
+  llmManager: LlmCallManager
 ): Promise<void> {
   let idx = 0;
   const concurrency = task.workerConcurrency;
   const domainCap = task.maxPagesPerDomain;
   const minRelevance = task.minRelevanceScore;
 
-  while (
-    results.length < task.pageBudget &&
-    idx < candidates.length &&
-    !signal.aborted
-  ) {
+  while (results.length < task.pageBudget && idx < candidates.length && !signal.aborted) {
     const slice = candidates.slice(idx, idx + concurrency);
     idx += concurrency;
 
     const batch: ScoredCandidate[] = [];
     for (const c of slice) {
       const normalized = normalizeUrl(c.url);
-
-      if (state.visitedUrls.has(normalized)) {
-        metrics.skippedVisited++;
-        continue;
-      }
-      if (state.domainCount(c.url) >= domainCap) {
-        metrics.skippedDomainCap++;
-        continue;
-      }
-      if (state.shouldAvoidUrl(c.url)) {
-        metrics.skippedAvoided++;
-        continue;
-      }
-      if (state.isDomainBlacklisted(c.url)) {
-        metrics.skippedBlacklisted++;
-        continue;
-      }
-
+      if (state.visitedUrls.has(normalized)) { metrics.skippedVisited++; continue; }
+      if (state.domainCount(c.url) >= domainCap) { metrics.skippedDomainCap++; continue; }
+      if (state.shouldAvoidUrl(c.url)) { metrics.skippedAvoided++; continue; }
+      if (state.isDomainBlacklisted(c.url)) { metrics.skippedBlacklisted++; continue; }
       batch.push(c);
     }
 
     if (batch.length === 0) continue;
 
-    for (const c of batch) {
-      state.addVisited(c.url);
-    }
+    for (const c of batch) state.addVisited(c.url);
 
     const settled = await Promise.allSettled(
-      batch.map((c) =>
-        resolveCandidate(c, task, state, topicKws, signal, metrics),
-      ),
+      batch.map((c) => resolveCandidate(c, task, state, topicKws, signal, metrics)),
     );
 
     for (let i = 0; i < settled.length; i++) {
@@ -600,41 +430,12 @@ async function fetchBatch(
 
       const { page, fromCache } = settledResult.value;
 
-      if (page.wordCount < MIN_USEFUL_WORD_COUNT) {
-        metrics.skippedLowWordCount++;
-        if (fromCache) metrics.cacheRejectedLowWordCount++;
-        continue;
-      }
-
-      if (page.relevanceScore < minRelevance * 0.5) {
-        metrics.skippedVeryOffTopic++;
-        if (fromCache) {
-          metrics.cacheRejectedOffTopic++;
-        } else {
-          state.noteDomainFailure(candidate.url);
-        }
-        status(
-          `${tag} Skipped (very off-topic, rel=${page.relevanceScore.toFixed(2)}): ${truncUrl(candidate.url)}`,
-        );
-        continue;
-      }
-
-      if (page.relevanceScore < minRelevance) {
-        metrics.skippedOffTopic++;
-        if (fromCache) metrics.cacheRejectedOffTopic++;
-        status(
-          `${tag} Skipped (off-topic, rel=${page.relevanceScore.toFixed(2)}): ${truncUrl(candidate.url)}`,
-        );
-        continue;
-      }
+      if (page.wordCount < MIN_USEFUL_WORD_COUNT) { metrics.skippedLowWordCount++; if (fromCache) metrics.cacheRejectedLowWordCount++; continue; }
+      if (page.relevanceScore < minRelevance * 0.5) { metrics.skippedVeryOffTopic++; if (fromCache) metrics.cacheRejectedOffTopic++; else state.noteDomainFailure(candidate.url); continue; }
+      if (page.relevanceScore < minRelevance) { metrics.skippedOffTopic++; if (fromCache) metrics.cacheRejectedOffTopic++; continue; }
 
       const fp = contentFingerprint(page.text);
-      if (state.contentHashes.has(fp)) {
-        metrics.skippedDuplicateContent++;
-        if (fromCache) metrics.cacheRejectedDuplicate++;
-        status(`${tag} Skipped duplicate: ${truncUrl(candidate.url)}`);
-        continue;
-      }
+      if (state.contentHashes.has(fp)) { metrics.skippedDuplicateContent++; if (fromCache) metrics.cacheRejectedDuplicate++; continue; }
 
       state.addHash(fp);
       state.incrementDomain(candidate.url);
@@ -644,13 +445,13 @@ async function fetchBatch(
       } else {
         state.markVisitedPersistent(page);
         metrics.cacheWrites++;
+        state.addWebCacheDocument(page);
       }
 
       results.push(page);
+      llmManager.recordProgress(); // Tell the watchdog we found something!
 
-      status(
-        `${tag} [${results.length}/${task.pageBudget}] ${fromCache ? "[cache] " : ""}(rel=${page.relevanceScore.toFixed(2)}) ${page.title.slice(0, 60)}`,
-      );
+      status(`${tag} [${results.length}/${task.pageBudget}] ${fromCache ? "[cache] " : ""}(rel=${page.relevanceScore.toFixed(2)}) ${page.title.slice(0, 60)}`);
 
       if (results.length >= task.pageBudget) return;
     }
@@ -675,27 +476,14 @@ async function resolveCandidate(
   if (cached) {
     metrics.cacheHits++;
     return {
-      page: adaptCachedSourceForTask(
-        cached,
-        candidate.query,
-        candidate.snippet,
-        task,
-        topicKws,
-      ),
+      page: adaptCachedSourceForTask(cached, candidate.query, candidate.snippet, task, topicKws),
       fromCache: true,
     };
   }
 
   metrics.fetchAttempts++;
   return {
-    page: await fetchAndExtract(
-      candidate.url,
-      candidate.query,
-      candidate.snippet,
-      task,
-      topicKws,
-      signal,
-    ),
+    page: await fetchAndExtract(candidate.url, candidate.query, candidate.snippet, task, topicKws, signal, candidate.discoveredBy),
     fromCache: false,
   };
 }
@@ -707,16 +495,8 @@ function adaptCachedSourceForTask(
   task: SwarmTask,
   topicKws: ReadonlyArray<string>,
 ): CrawledSource {
-  const { domainScore, freshnessScore, tier } = scoreCandidate(
-    { url: cached.url, title: cached.title, snippet: cached.description },
-    query,
-  );
-  const relevanceScore = computeRelevance(
-    cached.text,
-    cached.title,
-    snippet,
-    topicKws,
-  );
+  const { domainScore, freshnessScore, tier } = scoreCandidate({ url: cached.url, title: cached.title, snippet: cached.description }, query);
+  const relevanceScore = computeRelevance(cached.text, cached.title, snippet, topicKws);
   return {
     ...cached,
     url: normalizeUrl(cached.url),
@@ -745,21 +525,12 @@ async function followLinks(
   topicKws: ReadonlyArray<string>,
   depth: number,
   metrics: CrawlMetrics,
+  llmManager: LlmCallManager
 ): Promise<number> {
   const allLinks = existingSources.flatMap((s) => s.outlinks);
-  const linkKws = task.queries
-    .join(" ")
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((w) => w.length > 3)
-    .slice(0, 12);
+  const linkKws = task.queries.join(" ").toLowerCase().split(/\s+/).filter((w) => w.length > 3).slice(0, 12);
 
-  const scored = scoreOutlinks(
-    allLinks,
-    linkKws,
-    state.visitedUrls,
-    task.maxLinksToEvaluate,
-  );
+  const scored = scoreOutlinks(allLinks, linkKws, state.visitedUrls, task.maxLinksToEvaluate);
   const toFollow = scored.slice(0, task.maxLinksToFollow);
 
   if (toFollow.length === 0) return 0;
@@ -767,23 +538,9 @@ async function followLinks(
   status(`${tag} Following ${toFollow.length} link(s) (depth ${depth})…`);
 
   const before = results.length;
-  const linkCandidates = toFollow.map((l) =>
-    scoreCandidate({ url: l.href, title: "", snippet: "" }, task.queries[0] ?? ""),
-  );
+  const linkCandidates = toFollow.map((l) => scoreCandidate({ url: l.href, title: "", snippet: "" }, task.queries[0] ?? ""));
 
-  await fetchBatch(
-    linkCandidates,
-    { ...task, pageBudget: results.length + budget },
-    state,
-    signal,
-    status,
-    warn,
-    results,
-    errors,
-    tag,
-    topicKws,
-    metrics,
-  );
+  await fetchBatch(linkCandidates, { ...task, pageBudget: results.length + budget }, state, signal, status, warn, results, errors, tag, topicKws, metrics, llmManager);
 
   return results.length - before;
 }
@@ -795,46 +552,43 @@ async function fetchAndExtract(
   task: SwarmTask,
   topicKws: ReadonlyArray<string>,
   signal: AbortSignal,
+  discoveredBy?: string,
 ): Promise<CrawledSource> {
-  const fetchResult = await fetchWithWaybackFallback(url, signal);
-  const { finalUrl } = fetchResult;
+  let page: ExtractedPage;
 
-  const isPdf =
-    (fetchResult.rawBuffer && isPdfContentType(fetchResult.contentType)) ||
-    (!fetchResult.rawBuffer && isPdfUrl(url));
-
-  let page;
-  if (isPdf && fetchResult.rawBuffer) {
-    page = await extractPdf(
-      fetchResult.rawBuffer,
-      url,
-      finalUrl,
-      task.contentLimit,
-      false,
-    );
-  } else if (isPdf && fetchResult.html && fetchResult.html.startsWith("%PDF")) {
-    const buf = Buffer.from(fetchResult.html, "binary");
-    page = await extractPdf(buf, url, finalUrl, task.contentLimit, false);
+  if (/youtube\.com|youtu\.be/i.test(url)) {
+    const ytData = await extractYouTubeTranscript(url, signal, task.contentLimit);
+    if (!ytData) throw new Error("YouTube transcript extraction failed");
+    page = {
+      url: url,
+      finalUrl: url,
+      title: ytData.title,
+      description: ytData.description,
+      published: null,
+      text: ytData.text,
+      wordCount: ytData.text.split(/\s+/).filter(Boolean).length,
+      outlinks: [],
+      page: 1,
+      totalPages: 1,
+    };
   } else {
-    page = extractPage(
-      fetchResult.html,
-      url,
-      finalUrl,
-      task.contentLimit,
-      task.maxOutlinksPerPage,
-    );
+    const fetchResult = await fetchWithWaybackFallback(url, signal, task);
+    const { finalUrl } = fetchResult;
+
+    const isPdf = (fetchResult.rawBuffer && isPdfContentType(fetchResult.contentType)) || (!fetchResult.rawBuffer && isPdfUrl(url));
+
+    if (isPdf && fetchResult.rawBuffer) {
+      page = await extractPdf(fetchResult.rawBuffer, url, finalUrl, task.contentLimit, false);
+    } else if (isPdf && fetchResult.html && fetchResult.html.startsWith("%PDF")) {
+      const buf = Buffer.from(fetchResult.html, "binary");
+      page = await extractPdf(buf, url, finalUrl, task.contentLimit, false);
+    } else {
+      page = extractPage(fetchResult.html, url, finalUrl, task.contentLimit, task.maxOutlinksPerPage);
+    }
   }
 
-  const { domainScore, freshnessScore, tier } = scoreCandidate(
-    { url, title: page.title, snippet: page.description },
-    query,
-  );
-  const relevanceScore = computeRelevance(
-    page.text,
-    page.title,
-    snippet,
-    topicKws,
-  );
+  const { domainScore, freshnessScore, tier } = scoreCandidate({ url, title: page.title, snippet: page.description }, query);
+  const relevanceScore = computeRelevance(page.text, page.title, snippet, topicKws);
 
   return {
     url: normalizeUrl(page.url),
@@ -853,6 +607,7 @@ async function fetchAndExtract(
     tier: tier as SourceTier,
     relevanceScore,
     origin: "web" as const,
+    discoveredBy: discoveredBy ?? "unknown",
     page: page.page,
     totalPages: page.totalPages,
   };
@@ -866,6 +621,8 @@ async function getLLMQueryMutation(
   try {
     const endpoint = "http://localhost:1234/v1/chat/completions";
     const prompt = `You are a deep research assistant. The initial query "${query}" yielded these snippets:\n${topSnippets.slice(0, 3).join("\n")}\n\nGenerate ONE highly specific, alternative search query to find missing technical details or counter-arguments. Return ONLY the raw query string, no quotes or explanations.`;
+    
+    logLlmDiagnostics("getLLMQueryMutation", prompt);
 
     const res = await fetch(endpoint, {
       method: "POST",
@@ -891,10 +648,39 @@ async function getLLMQueryMutation(
 async function fetchWithWaybackFallback(
   url: string,
   signal: AbortSignal,
+  task: SwarmTask // <-- We add task here to grab the config!
 ): Promise<Awaited<ReturnType<typeof fetchPage>>> {
   try {
+    // TIER A: Standard Fetch (Tries normally first)
     return await fetchPage(url, signal);
-  } catch (err) {
+  } catch (err: any) {
+    if (isAbortError(err)) throw err;
+
+    // TIER B: FlareSolverr (Optional Power-User Bypass)
+    const fsUrl = (task as any).flaresolverrUrl as string | undefined;
+    if (fsUrl && fsUrl.trim() !== "") {
+      try {
+        const fsRes = await fetch(fsUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cmd: "request.get", url: url, maxTimeout: 15000 }),
+          signal
+        });
+        const fsData = await fsRes.json();
+        if (fsData?.solution?.response) {
+          return {
+            html: fsData.solution.response,
+            finalUrl: url,
+            contentType: "text/html",
+            rawBuffer: undefined // FlareSolverr only returns HTML, not raw PDFs
+          };
+        }
+      } catch (fsErr) {
+        // Silently fail and drop down to Wayback Machine
+      }
+    }
+
+    // TIER C: Wayback Machine Archive
     try {
       const api = `https://archive.org/wayback/available?url=${encodeURIComponent(url)}`;
       const apiRes = await fetch(api, { signal });

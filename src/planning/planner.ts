@@ -1,3 +1,4 @@
+import { logLlmDiagnostics } from "../utils/tokens";
 import { LMStudioClient } from "@lmstudio/sdk";
 import {
   QueryPlan,
@@ -94,22 +95,22 @@ function makeDecompositionPrompt(
   const focus = focusAreas.length
     ? `\nFocus areas: ${focusAreas.join(", ")}`
     : "";
-  return `You are a research decomposition system. Given a research topic, output a JSON array of specialized worker agents.
+  return `You are a research decomposition system. Given a research topic, output a strict JSON array of specialized worker agents.
 Topic: "${topic}"${focus}
-Each worker needs:
+
+Each worker object MUST have:
 "role": one of "breadth", "depth", "recency", "academic", "critical", "statistical", "regulatory", "technical", "primary", "comparative"
 "label": descriptive name (e.g., "Clinical Evidence Researcher", "Policy Critic")
-"queries": array of ${Math.min(profile.maxQueriesPerWorker, 6)}-${profile.maxQueriesPerWorker} specific search queries for this worker
-"budgetWeight": number 0.1-0.4 (must sum to ~1.0 across all workers)
-"followLinks": true/false (true for depth/academic workers)
-"preferredTiers": optional array of "academic","government","reference","news","professional","general"
+"queries": array of ${Math.min(profile.maxQueriesPerWorker, 6)}-${profile.maxQueriesPerWorker} specific, natural search queries
+"budgetWeight": number 0.1-0.4
+"followLinks": boolean
+"preferredTiers": array of strings
+
 Rules:
-Output ${DECOMPOSITION_MIN_WORKERS} to ${profile.maxDecompositionWorkers} workers
-Tailor the workers to THIS specific topic - not generic roles
-Queries must be highly specific to the topic and each worker's assignment
-Generate MORE queries for broader or more complex topics
-Budget weights must roughly sum to 1.0
-Output ONLY valid JSON, no other text
+1. Output ${DECOMPOSITION_MIN_WORKERS} to ${profile.maxDecompositionWorkers} workers.
+2. Queries must be human-like search strings (under 8 words). DO NOT just mash the topic and role together.
+3. Output ONLY valid JSON. No conversational text.
+
 JSON:`;
 }
 
@@ -191,16 +192,17 @@ function makeRolePlanPrompt(
   const focus = focusAreas.length
     ? `\nFocus especially on: ${focusAreas.join(", ")}`
     : "";
-  return `You are a research planning assistant. Generate search queries for a specialised research agent.
+  return `You are an expert Google searcher planning queries for a specialised research agent.
 Topic: "${topic}"${focus}
 This agent's role: ${roleDescriptions[role]}
+
 Generate exactly ${profile.maxQueriesPerWorker} highly specific, diverse search queries for this role.
+
 Rules:
-Each query must be different from the others
-Use natural language (as a human would type into a search engine)
-Be specific to the role - ${roleDescriptions[role]}
-Vary query structure: some factual, some comparative, some recent
-Return ONLY the queries, one per line, no numbering, no extra text
+1. DO NOT just append words to the topic string. (BAD: "${topic} statistics data")
+2. Use natural human search language. (GOOD: "how many people believe in reincarnation statistics")
+3. Return ONLY the queries, one per line, no numbering, no punctuation, no extra text.
+
 Queries:`;
 }
 
@@ -226,7 +228,10 @@ function dimensionFallbackQueries(
   const dimIds = ROLE_DIMENSIONS[role];
   const dims = DIMENSIONS.filter((d) => dimIds.includes(d.id));
   const queries: string[] = [];
-  const shortTopic = shortenTopic(topic);
+  
+  // BUGFIX: Actually use the shortenTopic function to strip the massive prompt
+  const shortTopic = shortenTopic(topic); 
+  
   for (const dim of dims) {
     for (const q of dim.queries(shortTopic)) {
       if (!queries.includes(q)) queries.push(q);
@@ -272,7 +277,7 @@ export async function buildQueryPlan(
   let usedAI = false;
   let dynamicSpecs: ReadonlyArray<DynamicWorkerSpec> | undefined;
   if (useAI) {
-    status("AI task decomposition - analysing topic for specialised workers…");
+    status("AI task decomposition - analysing topic for specialised workers...");
     const specs = await aiDecompose(topic, focusAreas, status, profile);
     if (specs && specs.length >= DECOMPOSITION_MIN_WORKERS) {
       dynamicSpecs = specs;
@@ -281,7 +286,7 @@ export async function buildQueryPlan(
         queriesByRole[spec.role] = spec.queries;
       }
     } else {
-      status("AI planning queries for each swarm worker…");
+      status("AI planning queries for each swarm worker...");
     }
     const uncoveredRoles = roles.filter((r) => !queriesByRole[r]?.length);
     if (uncoveredRoles.length > 0) {
@@ -322,13 +327,27 @@ export async function buildQueryPlan(
       );
     }
   }
+  
+  const topicKeywords = extractKeywords(topic);
+
+  // PRE-SEARCH PLANNING (If AI is enabled)
+  if (useAI) {
+    const planPrompt = `Topic: ${topic}\nFocus: ${focusAreas.join(", ")}\n
+    Generate a JSON object with:
+    1. "subQuestions": 3-5 specific questions to answer.
+    2. "likelySourceTypes": Array of strings (e.g., "academic", "news", "reference").
+    3. "stopConditions": Array of strings (e.g., "Found 3 sources confirming Q3 revenue").`;
+    
+    logLlmDiagnostics("buildQueryPlan-PreSearch", planPrompt);
+  }
+
   return {
     queriesByRole: queriesByRole as Record<WorkerRole, ReadonlyArray<string>>,
     usedAI,
-    topicKeywords: extractKeywords(topic),
+    topicKeywords,
     dynamicSpecs,
   };
-}
+} 
 
 export async function summariseFindings(
   sources: ReadonlyArray<CrawledSource>,
@@ -447,7 +466,10 @@ export async function buildAdaptiveGapFill(
       tiers?: ReadonlyArray<import("../types").SourceTier>;
     }
   >();
+  
+  // BUGFIX: Shorten the topic here too so the fallback queries are clean
   const shortTopic = shortenTopic(topic);
+  
   for (const gap of gaps) {
     const mapping = GAP_ROLE_MAP[gap.id] ?? {
       role: "breadth" as WorkerRole,
@@ -476,13 +498,17 @@ export async function buildAdaptiveGapFill(
           group.dimLabels.length * 3,
           profile.maxGapFillQueries,
         );
-        const prompt = `You are a research assistant. A research session on "${topic}" is missing these angles:
+        const prompt = `You are an expert Google searcher. A research session on "${topic}" is missing these angles:
 ${group.dimLabels.join(", ")}
 ${followUpContext.length > 0 ? `Previous round suggested exploring:\n${followUpContext.join("\n")}\n` : ""}
-Generate ${queryCount} specific search queries to fill these gaps.
-The queries should be best suited for a ${role} research agent.
-Make queries diverse - cover different angles and phrasings.
-Return ONLY the queries, one per line.
+
+Generate ${queryCount} specific, natural search engine queries to fill these gaps.
+
+Rules:
+1. DO NOT just append words to the topic string. Write human-like search queries.
+2. Keep queries short and concise.
+3. Return ONLY the queries, one per line. No numbering, no prefixes.
+
 Queries:`;
         return { role, raw: await callLoadedModel(prompt) };
       }),
@@ -512,37 +538,10 @@ Queries:`;
 }
 
 const STOP_WORDS = new Set([
-  "the",
-  "a",
-  "an",
-  "is",
-  "in",
-  "of",
-  "and",
-  "or",
-  "for",
-  "to",
-  "how",
-  "what",
-  "why",
-  "when",
-  "does",
-  "with",
-  "from",
-  "that",
-  "could",
-  "which",
-  "about",
-  "their",
-  "this",
-  "these",
-  "those",
-  "would",
-  "should",
-  "current",
-  "hypothetical",
-  "scenarios",
-  "lead",
+  "the", "a", "an", "is", "in", "of", "and", "or", "for", "to", "how", "what",
+  "why", "when", "does", "with", "from", "that", "could", "which", "about",
+  "their", "this", "these", "those", "would", "should", "current",
+  "hypothetical", "scenarios", "lead",
 ]);
 
 function extractKeywords(topic: string): ReadonlyArray<string> {

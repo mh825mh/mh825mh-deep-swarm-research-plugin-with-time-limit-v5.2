@@ -2,6 +2,7 @@ export interface SearchHit {
   readonly title: string;
   readonly url: string;
   readonly snippet: string;
+  readonly discoveredBy?: string; // ADDED: Engine attribution
 }
 
 export interface ExtractedPage {
@@ -41,6 +42,7 @@ export interface ScoredCandidate {
   readonly urlQuality: number;
   readonly totalScore: number;
   readonly tier: SourceTier;
+  readonly discoveredBy?: string; 
 }
 
 export type WorkerRole =
@@ -87,10 +89,14 @@ export interface SwarmTask {
   readonly linkCrawlDepth: number;
   readonly queryMutationThreshold: number;
   readonly enableLocalSources: boolean;
+  readonly enableYouTube?: boolean;
   readonly localLibraryIds?: ReadonlyArray<string>;
   readonly roleLibraryMap?: ReadonlyMap<string, ReadonlyArray<string>>;
   readonly timeRange?: "all" | "year" | "month" | "week" | "day";
+  readonly serperApiKey?: string;
+  readonly braveApiKey?: string;
 }
+
 
 export interface WorkerResult {
   readonly taskId: string;
@@ -118,6 +124,7 @@ export interface CrawledSource {
   readonly tier: SourceTier;
   readonly relevanceScore: number;
   readonly origin: SourceOrigin;
+  readonly discoveredBy?: string; // ADDED: Engine attribution
   readonly page?: number;
   readonly totalPages?: number;
 }
@@ -187,6 +194,7 @@ export interface ReportSource {
   readonly totalPages?: number;
 }
 
+
 export interface CompiledReport {
   readonly markdown: string;
   readonly sources: ReadonlyArray<ReportSource>;
@@ -198,18 +206,52 @@ export interface CompiledReport {
 }
 
 export interface ResearchConfig {
+    readonly contextBudgetMode?: "auto" | "conservative" | "manual";
+  readonly manualContextLimit?: number;
+  readonly maxSynthesisInputTokens?: number;
   readonly topic: string;
   readonly focusAreas: ReadonlyArray<string>;
   readonly depthPreset: import("./constants").DepthPreset;
   readonly contentLimitPerPage: number;
+  readonly contextIsolation?: ContextIsolationMode;
+  readonly llmCallMode?: "compact" | "standard" | "deep" | "extended";
   readonly enableLinkFollowing: boolean;
   readonly enableAIPlanning: boolean;
   readonly safeSearch: "strict" | "moderate" | "off";
+
+  /**
+   * Enables indexed local RAG libraries as research evidence.
+   */
   readonly enableLocalSources: boolean;
+
+  /**
+   * Optional allow-list of RAG library UUIDs.
+   * When omitted, role-based routing or progressive retrieval is used.
+   */
   readonly localLibraryIds?: ReadonlyArray<string>;
+
+  /**
+   * Optional worker-role-to-library-ID routing map.
+   * Example: { academic: ["uuid"], technical: ["uuid"] }.
+   */
   readonly roleLibraryMap?: ReadonlyMap<string, ReadonlyArray<string>>;
+
+  /**
+   * Maximum session duration in milliseconds.
+   * Omit or set to 0 for no explicit orchestrator time limit.
+   */
   readonly maxSessionMs?: number;
+
   readonly timeRange?: "all" | "year" | "month" | "week" | "day";
+
+  readonly engineSelectionMode?: "adaptive" | "benchmark" | "priority";
+  readonly cacheDuration?: string;
+  readonly enableXSearch?: boolean;
+  readonly enableYouTube?: boolean;
+  readonly enableAcademicAPIs?: boolean;
+  readonly enableReferenceSearch?: boolean;
+  readonly serperApiKey?: string;
+  readonly braveApiKey?: string;
 }
 
 export interface ResearchResult {
@@ -217,6 +259,98 @@ export interface ResearchResult {
   readonly queriesUsed: ReadonlyArray<string>;
   readonly totalSources: number;
   readonly totalRounds: number;
+}
+
+export interface EvidenceCard {
+  readonly id: string;
+  readonly entityType: "book" | "podcast" | "standard" | "article" | "local document" | "web";
+  readonly title: string;
+  readonly authorOrHost: string;
+  readonly canonicalUrl: string;
+  readonly sourceTier: SourceTier;
+  readonly relevantClaim: string;
+  readonly supportingExcerpt: string;
+  readonly confidence: "High" | "Medium" | "Low";
+  readonly freshness: string | null;
+  readonly worker: string;
+}
+
+export interface ContextBudget {
+  readonly mode: "auto" | "conservative" | "manual";
+  readonly modelContextLimit: number;
+  readonly outputReserve: number;
+  readonly safetyMargin: number;
+  readonly maxSynthesisInput: number;
+}
+export type ContextIsolationMode = "strict" | "worker_reuse" | "advanced_reuse";
+
+export interface LlmCallBudget {
+  readonly mode: "compact" | "standard" | "deep" | "extended";
+  readonly maxGlobalCalls: number;
+  readonly maxCallsPerWorker: number;
+  readonly maxRuntimeMs: number;
+  readonly warningThresholdMs: number;
+}
+
+export interface RunWatchdog {
+  llmCallsMade: number;
+  workerCalls: Map<string, number>;
+  startTime: number;
+  stalled: boolean;
+  lastProgressTime: number;
+}
+// Add to SearchHit interface
+export interface SearchHit {
+  readonly title: string;
+  readonly url: string;
+  readonly snippet: string;
+  readonly discoveredBy?: string;
+  readonly requestedRoute?: string; // "DDG", "SearxNG", "Direct"
+  readonly actualBackend?: string;  // "DDG", "Yandex", "Bing"
+  readonly resultDomain?: string;   // "cambridge.org", "orx.org"
+}
+
+// Verification Tiers
+export type VerificationTier = "A" | "B" | "C" | "REJECTED";
+
+export interface EntityMetadata {
+  // Books
+  author?: string;
+  publisher?: string;
+  edition?: string;
+  year?: string;
+  isbn?: string;
+  // Podcasts
+  host?: string;
+  rssUrl?: string;
+  latestEpisodeDate?: string;
+  distributionPlatform?: string;
+  // General
+  officialUrl?: string;
+  independentValidationUrl?: string;
+  riskSubdomain?: string;
+  audienceFit?: string;
+}
+
+export interface EvidenceCard {
+  readonly id: string;
+  readonly entityType: "book" | "podcast" | "standard" | "article" | "local document" | "web";
+  readonly title: string;
+  readonly authorOrHost: string;
+  readonly canonicalUrl: string;
+  readonly sourceTier: SourceTier;
+  readonly relevantClaim: string;
+  readonly supportingExcerpt: string;
+  readonly confidence: "High" | "Medium" | "Low";
+  readonly freshness: string | null;
+  readonly worker: string;
+  
+  // New Verification Fields
+  readonly verificationTier: VerificationTier;
+  readonly metadataConfidence: number; // 0.0 - 1.0
+  readonly topicFit: number;           // 0.0 - 1.0
+  readonly recommendationStrength: number; // 0.0 - 1.0
+  readonly entityMetadata: EntityMetadata;
 }
 
 export type StatusFn = (message: string) => void;

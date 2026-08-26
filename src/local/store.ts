@@ -4,11 +4,27 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as os from "node:os";
 import * as crypto from "node:crypto";
 import { JSDOM } from "jsdom";
 import TurndownService from "turndown";
 
 const turndownService = new TurndownService();
+
+const DEFAULT_RAG_DIR = path.join(
+  os.homedir(),
+  ".deep-swarm-research",
+  "rag",
+);
+
+const DEFAULT_RAG_INDEX_PATH = path.join(
+  DEFAULT_RAG_DIR,
+  "rag-index.json",
+);
+
+function ensureDefaultRagDir(): void {
+  fs.mkdirSync(DEFAULT_RAG_DIR, { recursive: true });
+}
 
 let _storePDFParse: any = null;
 let _storePDFAttempted = false;
@@ -86,6 +102,7 @@ export interface LocalLibrary {
   readonly totalWords: number;
   readonly indexedAt: string;
   readonly files: ReadonlyArray<FileMetadata>;
+  readonly indexingReport?: ReadonlyArray<string>;
 }
 
 export interface LocalSearchHit {
@@ -137,7 +154,7 @@ interface PersistedChunk {
   readonly fileType: string;
 }
 
-const MIN_CHUNK_WORDS = 15;
+const MIN_CHUNK_WORDS = 3
 const MAX_CHUNKS_PER_FILE = 300;
 const PERSIST_VERSION = 2;
 
@@ -337,11 +354,21 @@ const STOP_WORDS = new Set([
 ]);
 
 function tokenize(text: string): string[] {
-  return text
+  const normalized = text
     .toLowerCase()
-    .replace(/[^a-z0-9\s\-_]/g, " ")
+    .replace(/[^a-z0-9\s\-_]/g, " ");
+
+  const words = normalized
     .split(/\s+/)
-    .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
+    .filter((word) => word.length > 0);
+
+  const searchable = words.filter(
+    (word) => word.length > 2 && !STOP_WORDS.has(word),
+  );
+
+  return searchable.length > 0
+    ? searchable
+    : words.filter((word) => word.length > 0);
 }
 
 function stemSimple(word: string): string {
@@ -426,64 +453,28 @@ function detectHeading(text: string): { heading: string; depth: number } {
   return { heading: "", depth: 0 };
 }
 
-function smartChunkText(text: string, chunkSize: number): ChunkMeta[] {
+function smartChunkText(
+  text: string,
+  chunkSize: number,
+): ChunkMeta[] {
+  const trimmed = text.trim();
+
+  if (trimmed.length < 3) {
+    return [];
+  }
+
   const overlap = Math.round(chunkSize * 0.12);
   const chunks: ChunkMeta[] = [];
+  const { heading, depth } = detectHeading(trimmed);
 
-  const sectionBreaks = text.split(/\n(?=#{1,6}\s|\d+\.\s|[A-Z]{5,}\n)/);
-
-  let buffer = "";
-  let currentHeading = "";
-  let currentDepth = 0;
-
-  for (const section of sectionBreaks) {
-    const { heading: newHeading, depth: newDepth } = detectHeading(section);
-
-    if (newHeading) {
-      if (buffer.trim().length > 100) {
-        pushChunks(
-          buffer,
-          currentHeading,
-          currentDepth,
-          chunkSize,
-          overlap,
-          chunks,
-        );
-      }
-      buffer = section;
-      currentHeading = newHeading;
-      currentDepth = newDepth;
-    } else {
-      buffer += "\n" + section;
-    }
-
-    if (buffer.length > chunkSize * 1.5) {
-      pushChunks(
-        buffer,
-        currentHeading,
-        currentDepth,
-        chunkSize,
-        overlap,
-        chunks,
-      );
-      buffer = "";
-    }
-  }
-
-  if (buffer.trim().length > 50) {
-    pushChunks(
-      buffer,
-      currentHeading,
-      currentDepth,
-      chunkSize,
-      overlap,
-      chunks,
-    );
-  }
-
-  if (chunks.length === 0 && text.trim().length > 50) {
-    pushChunks(text, "", 0, chunkSize, overlap, chunks);
-  }
+  pushChunks(
+    trimmed,
+    heading,
+    depth,
+    chunkSize,
+    overlap,
+    chunks,
+  );
 
   return chunks.slice(0, MAX_CHUNKS_PER_FILE);
 }
@@ -498,7 +489,7 @@ function pushChunks(
 ): void {
   if (text.length <= chunkSize * 1.3) {
     const trimmed = text.trim();
-    if (trimmed.length > 50) {
+    if (trimmed.length >= 3) {
       out.push({ text: trimmed, heading, sectionDepth: depth });
     }
     return;
@@ -521,7 +512,7 @@ function pushChunks(
     }
 
     const trimmed = slice.trim();
-    if (trimmed.length > 50) {
+    if (trimmed.length >= 3) {
       const chunkHeading =
         offset === 0 ? heading : detectHeading(trimmed).heading || heading;
       out.push({ text: trimmed, heading: chunkHeading, sectionDepth: depth });
@@ -574,23 +565,32 @@ function cleanPdfText(raw: string): string {
     .trim();
 }
 
-async function readFileAsText(filePath: string): Promise<string | null> {
+async function readFileAsText(
+  filePath: string,
+): Promise<string | null> {
   try {
     const ext = path.extname(filePath).toLowerCase();
 
     if (ext === ".pdf") {
       const PDFParseRef = getStorePDFParse();
-      if (!PDFParseRef) return null;
+
+      if (!PDFParseRef) {
+        return null;
+      }
+
       try {
         const buffer = fs.readFileSync(filePath);
         const data = new Uint8Array(buffer);
-        const parser = new PDFParseRef({ data } as any);
+        const parser = new PDFParseRef(data as any);
+
         const result = await parser.getText({
           lineEnforce: true,
           lineThreshold: 5,
         });
+
         await parser.destroy();
-        return cleanPdfText(result.text || "");
+
+        return cleanPdfText(result.text);
       } catch {
         return null;
       }
@@ -600,12 +600,14 @@ async function readFileAsText(filePath: string): Promise<string | null> {
       try {
         const raw = fs.readFileSync(filePath, "utf-8");
         const notebook = JSON.parse(raw);
+
         return (notebook.cells ?? [])
-          .map((c: any) => {
-            const src = Array.isArray(c.source)
-              ? c.source.join("")
-              : (c.source ?? "");
-            return `[${c.cell_type}]\n${src}`;
+          .map((cell: any) => {
+            const source = Array.isArray(cell.source)
+              ? cell.source.join("")
+              : String(cell.source ?? "");
+
+            return `${cell.cell_type ?? "cell"}:\n${source}`;
           })
           .join("\n\n");
       } catch {
@@ -615,8 +617,45 @@ async function readFileAsText(filePath: string): Promise<string | null> {
 
     const raw = fs.readFileSync(filePath, "utf-8");
 
-    if (ext === ".html" || ext === ".htm" || ext === ".xhtml")
+    if (ext === ".html" || ext === ".htm" || ext === ".xhtml") {
       return stripHtmlTags(raw);
+    }
+
+    if (ext === ".csv" || ext === ".tsv") {
+      const delimiter = ext === ".tsv" ? "\t" : ",";
+      const lines = raw
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+      if (lines.length === 0) {
+        return "";
+      }
+
+      const headers = lines[0]
+        .split(delimiter)
+        .map((value) => value.trim().replace(/^"|"$/g, ""));
+
+      const rows = lines.slice(1).map((line, rowIndex) => {
+        const values = line
+          .split(delimiter)
+          .map((value) => value.trim().replace(/^"|"$/g, ""));
+
+        const fields = values
+          .map((value, columnIndex) => {
+            const header =
+              headers[columnIndex] ?? `column_${columnIndex + 1}`;
+
+            return `${header}: ${value}`;
+          })
+          .join("; ");
+
+        return `Row ${rowIndex + 1}: ${fields}`;
+      });
+
+      return [headers.join(", "), ...rows].join("\n");
+    }
+
     if (ext === ".json") {
       try {
         return JSON.stringify(JSON.parse(raw), null, 2);
@@ -744,10 +783,10 @@ export class LocalDocumentStore {
   private readonly bm25 = new BM25Index();
 
   getLibraries(): ReadonlyArray<LocalLibrary> {
-    return Array.from(this.libraries.values()).sort(
-      (a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority],
-    );
-  }
+  return Array.from(this.libraries.values()).sort(
+    (a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority],
+  );
+}
 
   getLibrary(id: string): LocalLibrary | undefined {
     return this.libraries.get(id);
@@ -787,13 +826,13 @@ export class LocalDocumentStore {
     return matching.map((lib) => lib.id);
   }
 
-  async indexLibrary(
+    async indexLibrary(
     name: string,
     folderPath: string,
-    description: string = "",
+    description = "",
     priority: LibraryPriority = "general",
     tags: LibraryTag[] = ["general"],
-    chunkSize: number = 4000,
+    chunkSize = 4000,
     onProgress?: (message: string) => void,
   ): Promise<LocalLibrary> {
     const resolvedPath = path.resolve(folderPath);
@@ -801,20 +840,26 @@ export class LocalDocumentStore {
     if (!fs.existsSync(resolvedPath)) {
       throw new Error(`Folder not found: ${resolvedPath}`);
     }
+
     if (!fs.statSync(resolvedPath).isDirectory()) {
       throw new Error(`Path is not a directory: ${resolvedPath}`);
     }
 
     const existingId = Array.from(this.libraries.values()).find(
-      (c) => c.folderPath === resolvedPath,
+      (library) => library.folderPath === resolvedPath,
     )?.id;
-    if (existingId) this.removeLibrary(existingId);
+
+    if (existingId) {
+      this.removeLibrary(existingId);
+    }
 
     const libraryId = crypto.randomUUID();
     const chunkIds = new Set<string>();
     const fileMetadatas: FileMetadata[] = [];
+    const indexingReport: string[] = [];
 
-    onProgress?.(`Scanning ${resolvedPath} for documents…`);
+    onProgress?.(`Scanning ${resolvedPath} for documents`);
+
     const files = scanDirectory(resolvedPath);
     onProgress?.(`Found ${files.length} supported files`);
 
@@ -823,30 +868,48 @@ export class LocalDocumentStore {
 
     for (const filePath of files) {
       const text = await readFileAsText(filePath);
-      if (!text || text.trim().length < 50) continue;
-
-      const textChunks = smartChunkText(text, chunkSize);
       const fileName = path.basename(filePath);
       const fileRelPath = path.relative(resolvedPath, filePath);
+
+      if (!text || text.trim().length < 3) {
+        indexingReport.push(`${fileRelPath}: unreadable or empty`);
+        continue;
+      }
+
       const ext = path.extname(filePath).toLowerCase();
-      const contentHash = fileContentHash(filePath);
+      const textChunks = smartChunkText(text, chunkSize);
 
       let fileStat: fs.Stats;
       try {
         fileStat = fs.statSync(filePath);
       } catch {
+        indexingReport.push(`${fileRelPath}: could not read file metadata`);
         continue;
       }
 
+      const fileIndex = indexedFiles;
+      let storedChunkCount = 0;
       let fileWordCount = 0;
 
       for (let ci = 0; ci < textChunks.length; ci++) {
         const chunkMeta = textChunks[ci];
         const tokens = tokenizeWithStems(chunkMeta.text);
-        if (tokens.length < MIN_CHUNK_WORDS) continue;
+        const rawWordCount = chunkMeta.text
+          .trim()
+          .split(/\s+/)
+          .filter(Boolean).length;
 
-        const chunkId = `${libraryId}:${indexedFiles}:${ci}`;
-        const terms = computeTermFrequencies(tokens);
+        if (rawWordCount === 0) {
+  continue;
+}
+
+const searchableTokens =
+  tokens.length > 0
+    ? tokens
+    : [`file_${fileName.replace(/[^a-z0-9]+/gi, "_").toLowerCase()}`];
+
+        const chunkId = `${libraryId}-${fileIndex}-${ci}`;
+        const terms = computeTermFrequencies(searchableTokens);
         const ngramSet = buildNgramSet(chunkMeta.text.slice(0, 500));
 
         const chunk: DocumentChunk = {
@@ -858,7 +921,7 @@ export class LocalDocumentStore {
           chunkIndex: ci,
           totalChunks: textChunks.length,
           text: chunkMeta.text,
-          wordCount: tokens.length,
+          wordCount: searchableTokens.length,
           terms,
           heading: chunkMeta.heading,
           sectionDepth: chunkMeta.sectionDepth,
@@ -868,8 +931,16 @@ export class LocalDocumentStore {
 
         this.chunks.set(chunkId, chunk);
         chunkIds.add(chunkId);
-        totalWords += tokens.length;
-        fileWordCount += tokens.length;
+        totalWords += searchableTokens.length;
+fileWordCount += searchableTokens.length;
+        storedChunkCount++;
+      }
+
+      if (storedChunkCount === 0) {
+        indexingReport.push(
+          `${fileRelPath}: 0 searchable chunks (${textChunks.length} candidates)`,
+        );
+        continue;
       }
 
       fileMetadatas.push({
@@ -879,15 +950,19 @@ export class LocalDocumentStore {
         fileType: ext || "unknown",
         sizeBytes: fileStat.size,
         modifiedAt: fileStat.mtime.toISOString(),
-        chunkCount: textChunks.length,
+        chunkCount: storedChunkCount,
         wordCount: fileWordCount,
         tags: inferFileTags(ext, fileName),
-        contentHash,
+        contentHash: fileContentHash(filePath),
       });
 
       indexedFiles++;
+      indexingReport.push(
+        `${fileRelPath}: ${storedChunkCount} chunks, ${fileWordCount} tokens`,
+      );
+
       if (indexedFiles % 50 === 0) {
-        onProgress?.(`Indexed ${indexedFiles}/${files.length} files…`);
+        onProgress?.(`Indexed ${indexedFiles}/${files.length} files`);
       }
     }
 
@@ -905,14 +980,15 @@ export class LocalDocumentStore {
       totalWords,
       indexedAt: new Date().toISOString(),
       files: fileMetadatas,
+      indexingReport,
     };
 
     this.libraries.set(libraryId, library);
     this.libraryChunks.set(libraryId, chunkIds);
 
     onProgress?.(
-      `Library "${name}" ready: ${indexedFiles} files, ${chunkIds.size} chunks, ` +
-      `~${totalWords.toLocaleString()} words [${priority}]`,
+      `${name} ready: ${indexedFiles} files, ${chunkIds.size} chunks, ` +
+        `${totalWords.toLocaleString()} words`,
     );
 
     return library;
@@ -987,7 +1063,7 @@ export class LocalDocumentStore {
     priorityBoost: boolean = true,
   ): ReadonlyArray<LocalSearchHit> {
     const queryTokens = tokenizeWithStems(query);
-    if (queryTokens.length === 0) return [];
+   
 
     const queryTerms = computeTermFrequencies(queryTokens);
     const queryNgrams = buildNgramSet(query);
@@ -1332,10 +1408,66 @@ function inferFileTags(ext: string, fileName: string): string[] {
 }
 
 let globalStore: LocalDocumentStore | null = null;
+let didLoadDefaultIndex = false;
 
 export function getGlobalStore(): LocalDocumentStore {
   if (!globalStore) {
     globalStore = new LocalDocumentStore();
   }
+
+  if (!didLoadDefaultIndex) {
+    didLoadDefaultIndex = true;
+
+    try {
+      ensureDefaultRagDir();
+
+      if (fs.existsSync(DEFAULT_RAG_INDEX_PATH)) {
+        const restored = globalStore.loadIndex(DEFAULT_RAG_INDEX_PATH);
+
+        if (restored.loaded > 0) {
+          console.log(
+            `[RAG] Restored ${restored.loaded} library(s) from ` +
+              DEFAULT_RAG_INDEX_PATH,
+          );
+        }
+
+        if (restored.skipped > 0) {
+          console.warn(
+            `[RAG] Skipped ${restored.skipped} unavailable library(s) ` +
+              "while restoring the saved index.",
+          );
+        }
+      }
+    } catch (error: unknown) {
+      const corruptPath =
+        `${DEFAULT_RAG_INDEX_PATH}.corrupt-${Date.now()}`;
+
+      try {
+        if (fs.existsSync(DEFAULT_RAG_INDEX_PATH)) {
+          fs.renameSync(DEFAULT_RAG_INDEX_PATH, corruptPath);
+        }
+      } catch {
+        // Keep RAG available even if backing up the bad index fails.
+      }
+
+      console.warn(
+        "[RAG] Saved index could not be restored:",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
   return globalStore;
+}
+
+export function saveGlobalStoreIndex(): void {
+  try {
+    ensureDefaultRagDir();
+    getGlobalStore().saveIndex(DEFAULT_RAG_INDEX_PATH);
+  } catch (error: unknown) {
+    console.warn(
+      "[RAG] Could not save default index:",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
 }

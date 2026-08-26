@@ -38,100 +38,33 @@ const STRIP_BEFORE_PARSE_RE =
   /<style[\s\S]*?<\/style>|<link[^>]+rel=["']stylesheet["'][^>]*>/gi;
 
 const BOILERPLATE_SELECTORS: ReadonlyArray<string> = [
-  "nav",
-  "header",
-  "footer",
-  ".nav",
-  ".navbar",
-  ".navigation",
-  ".header",
-  ".footer",
-  ".sidebar",
-  ".side-bar",
-  ".widget",
-  ".cookie-banner",
-  ".cookie-consent",
-  ".cookie-notice",
-  ".gdpr",
-  ".consent",
-  ".popup",
-  ".modal",
-  ".overlay",
-  ".ad",
-  ".ads",
-  ".advertisement",
-  ".advert",
-  ".banner-ad",
-  ".social-share",
-  ".social-links",
-  ".share-buttons",
-  ".sharing",
-  ".related-posts",
-  ".related-articles",
-  ".recommended",
-  ".comments",
-  ".comment-section",
-  "#comments",
-  ".newsletter",
-  ".subscribe",
-  ".subscription",
-  ".signup",
-  ".sign-up",
-  ".breadcrumb",
-  ".breadcrumbs",
-  ".pagination",
-  ".pager",
-  ".menu",
-  ".toc",
-  ".table-of-contents",
-  '[role="navigation"]',
-  '[role="banner"]',
-  '[role="contentinfo"]',
-  '[role="complementary"]',
-  '[aria-label*="cookie"]',
-  '[class*="cookie"]',
-  '[id*="cookie"]',
-  '[class*="gdpr"]',
-  '[class*="popup"]',
-  '[class*="modal"]',
-  '[class*="overlay"]',
-  '[class*="sidebar"]',
-  '[class*="footer"]',
-  '[class*="header"]',
-  '[class*="nav-"]',
-  '[class*="ad-"]',
-  '[class*="promo"]',
-  "aside",
-  "figcaption",
-  "noscript",
-  "iframe",
-  ".paywall",
-  ".meteredPaywall",
-  ".subscription-wall",
-  ".article-body-paywall",
-  "#piano_wrapper",
-  ".fancybox-overlay",
-  ".mfp-wrap",
-  ".tp-modal",
-  ".newsletter-popup",
-  ".email-subscribe",
-  ".inline-signup",
-  ".subscribe-modal",
-  ".newsletter-signup",
-  ".newsletter-container",
-  ".mc-modal",
-  ".cookie-wall",
-  ".consent-wall",
+  "nav", "header", "footer", ".nav", ".navbar", ".navigation", ".header",
+  ".footer", ".sidebar", ".side-bar", ".widget", ".cookie-banner",
+  ".cookie-consent", ".cookie-notice", ".gdpr", ".consent", ".popup",
+  ".modal", ".overlay", ".ad", ".ads", ".advertisement", ".advert",
+  ".banner-ad", ".social-share", ".social-links", ".share-buttons",
+  ".sharing", ".related-posts", ".related-articles", ".recommended",
+  ".comments", ".comment-section", "#comments", ".newsletter", ".subscribe",
+  ".subscription", ".signup", ".sign-up", ".breadcrumb", ".breadcrumbs",
+  ".pagination", ".pager", ".menu", ".toc", ".table-of-contents",
+  '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
+  '[role="complementary"]', '[aria-label*="cookie"]', '[class*="cookie"]',
+  '[id*="cookie"]', '[class*="gdpr"]', '[class*="popup"]', '[class*="modal"]',
+  '[class*="overlay"]', '[class*="sidebar"]', '[class*="footer"]',
+  '[class*="header"]', '[class*="nav-"]', '[class*="ad-"]', '[class*="promo"]',
+  "aside", "figcaption", "noscript", "iframe", ".paywall", ".meteredPaywall",
+  ".subscription-wall", ".article-body-paywall", "#piano_wrapper",
+  ".fancybox-overlay", ".mfp-wrap", ".tp-modal", ".newsletter-popup",
+  ".email-subscribe", ".inline-signup", ".subscribe-modal", ".newsletter-signup",
+  ".newsletter-container", ".mc-modal", ".cookie-wall", ".consent-wall",
   "#onetrust-consent-sdk",
 ];
 
 function stripBoilerplate(doc: Document): void {
-  const mediaSelectors =
-    "img, picture, video, audio, svg, canvas, iframe, object, embed";
+  const mediaSelectors = "img, picture, video, audio, svg, canvas, iframe, object, embed";
   doc.querySelectorAll(mediaSelectors).forEach((el) => el.remove());
 
-  const hiddenSelectors =
-    '[aria-hidden="true"], [style*="display:none"], [style*="display: none"], [style*="visibility:hidden"], [style*="opacity: 0"]';
+  const hiddenSelectors = '[aria-hidden="true"], [style*="display:none"], [style*="display: none"], [style*="visibility:hidden"], [style*="opacity: 0"]';
   doc.querySelectorAll(hiddenSelectors).forEach((el) => el.remove());
 
   for (const selector of BOILERPLATE_SELECTORS) {
@@ -166,6 +99,9 @@ export function extractPage(
   maxOutlinks: number = DEFAULT_MAX_OUTLINKS,
   page: number = 1,
 ): ExtractedPage {
+  // Check if html is empty to prevent JSDOM from throwing
+  if (!html) html = "<html><body></body></html>";
+
   const cleanedHtml = html.replace(STRIP_BEFORE_PARSE_RE, "");
   const dom = new JSDOM(cleanedHtml, { url: finalUrl, virtualConsole });
   const doc = dom.window.document;
@@ -179,6 +115,8 @@ export function extractPage(
   const { text, totalLength } = extractText(doc, html, contentLimit, page);
   const wordCount = text.split(/\s+/).filter(Boolean).length;
 
+  dom.window.close();
+
   return {
     url: sourceUrl,
     finalUrl,
@@ -189,7 +127,7 @@ export function extractPage(
     wordCount,
     outlinks,
     page,
-    totalPages: Math.ceil(totalLength / contentLimit),
+    totalPages: Math.ceil(Math.max(1, totalLength) / contentLimit),
   };
 }
 
@@ -227,12 +165,8 @@ function extractPublishedDate(doc: Document, url: string): string | null {
     doc.querySelectorAll('script[type="application/ld+json"]'),
   )) {
     try {
-      const data = JSON.parse(script.textContent ?? "{}") as Record<
-        string,
-        unknown
-      >;
-      const raw =
-        data["datePublished"] ?? data["dateModified"] ?? data["uploadDate"];
+      const data = JSON.parse(script.textContent ?? "{}") as Record<string, unknown>;
+      const raw = data["datePublished"] ?? data["dateModified"] ?? data["uploadDate"];
       if (typeof raw === "string") return toIsoDate(raw);
     } catch {
       /* skip malformed JSON-LD */
@@ -275,16 +209,7 @@ function extractText(
   try {
     const cloned = doc.cloneNode(true) as Document;
     const article = new Readability(cloned, {
-      classesToPreserve: [
-        "table",
-        "data-table",
-        "code",
-        "pre",
-        "highlight",
-        "math",
-        "latex",
-        "language-",
-      ],
+      classesToPreserve: ["table", "data-table", "code", "pre", "highlight", "math", "latex", "language-"],
       charThreshold: 100,
     }).parse();
 
@@ -298,17 +223,17 @@ function extractText(
         .trim();
 
       if (cleaned.length > MIN_READABILITY_TEXT_LEN) {
-        return {
-          text: cleaned.slice(start, end),
-          totalLength: cleaned.length,
-        };
+        return { text: cleaned.slice(start, end), totalLength: cleaned.length };
       }
     }
   } catch {
     /* fall through */
   }
 
-  const stripped = rawHtml
+  // BUGFIX: Use optional chaining and fallback to avoid crashing on null `doc.body`
+  const fallbackHtml = doc.body?.innerHTML || doc.documentElement?.innerHTML || "";
+  
+  const stripped = fallbackHtml
     .replace(/<script[\s\S]*?<\/script>/gi, "")
     .replace(/<style[\s\S]*?<\/style>/gi, "")
     .replace(/<nav[\s\S]*?<\/nav>/gi, "")
@@ -319,10 +244,7 @@ function extractText(
     .replace(/\s+/g, " ")
     .trim();
 
-  return {
-    text: stripped.slice(start, end),
-    totalLength: stripped.length,
-  };
+  return { text: stripped.slice(start, end), totalLength: stripped.length };
 }
 
 function extractOutlinks(
@@ -340,19 +262,13 @@ function extractOutlinks(
   const seen: Set<string> = new Set();
   const links: Outlink[] = [];
 
-  for (const el of Array.from(
-    doc.querySelectorAll<HTMLAnchorElement>("a[href]"),
-  )) {
+  for (const el of Array.from(doc.querySelectorAll<HTMLAnchorElement>("a[href]"))) {
     if (links.length >= maxOutlinks) break;
     const href = el.href;
     const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
     if (!href.startsWith("http")) continue;
     if (seen.has(href)) continue;
-    if (
-      text.length < OUTLINK_TEXT_MIN_LEN ||
-      text.length > OUTLINK_TEXT_MAX_LEN
-    )
-      continue;
+    if (text.length < OUTLINK_TEXT_MIN_LEN || text.length > OUTLINK_TEXT_MAX_LEN) continue;
     try {
       if (new URL(href).hostname === baseHost) continue;
     } catch {
@@ -365,19 +281,10 @@ function extractOutlinks(
 }
 
 export function contentFingerprint(text: string): string {
-  const words = text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, "")
-    .split(/\s+/)
-    .filter(Boolean);
-
-  if (
-    words.length <=
-    FINGERPRINT_HEAD_WORDS + FINGERPRINT_MID_WORDS + FINGERPRINT_TAIL_WORDS
-  ) {
+  const words = text.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter(Boolean);
+  if (words.length <= FINGERPRINT_HEAD_WORDS + FINGERPRINT_MID_WORDS + FINGERPRINT_TAIL_WORDS) {
     return words.join(" ");
   }
-
   const head = words.slice(0, FINGERPRINT_HEAD_WORDS);
   const midStart = Math.floor((words.length - FINGERPRINT_MID_WORDS) / 2);
   const mid = words.slice(midStart, midStart + FINGERPRINT_MID_WORDS);
@@ -392,7 +299,6 @@ export function computeRelevance(
   topicKws: ReadonlyArray<string>,
 ): number {
   if (topicKws.length === 0) return 0.5;
-
   const lowerText = text.toLowerCase();
   const lowerTitle = title.toLowerCase();
   const lowerSnippet = snippet.toLowerCase();
@@ -418,18 +324,13 @@ export function computeRelevance(
   }
 
   const densityWordCount = densityText.split(/\s+/).length;
-  const density = Math.min(
-    1,
-    (totalOccurrences / Math.max(1, densityWordCount)) * 10,
-  );
+  const density = Math.min(1, (totalOccurrences / Math.max(1, densityWordCount)) * 10);
   score += density * 0.1;
 
   const urlCount = (text.match(/https?:\/\/[^\s)]+/g) || []).length;
   const wordCount = text.split(/\s+/).length;
   const urlDensity = urlCount / Math.max(1, wordCount);
-  if (urlDensity > 0.05) {
-    score *= 0.5;
-  }
+  if (urlDensity > 0.05) score *= 0.5;
 
   return Math.min(1, Math.max(0, score));
 }

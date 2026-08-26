@@ -1,22 +1,15 @@
-/**
- * @file local/search.ts
- * Bridges the local document store into the swarm search pipeline.
- *
- * Converts local document chunks into SearchHit and CrawledSource objects
- * that flow through the same scoring, deduplication, and reporting paths
- * as web-sourced content.
- *
- * Now supports:
- * - Progressive source retrieval (proprietary -> internal -> reference -> general)
- * - Role-based auto-routing via library tags
- * - Context-enriched chunks (includes surrounding chunk text)
- * - Library priority boosting in relevance scores
- */
+import type {
+  CrawledSource,
+  SearchHit,
+  SourceTier,
+  WorkerRole,
+} from "../types";
+import {
+  getGlobalStore,
+  type LibraryPriority,
+  type LocalSearchHit,
+} from "./store";
 
-import { SearchHit, CrawledSource, WorkerRole, SourceTier } from "../types";
-import { getGlobalStore, LocalSearchHit, LibraryPriority } from "./store";
-
-/** Map library priority to source tier. */
 const PRIORITY_TIER_MAP: Record<LibraryPriority, SourceTier> = {
   proprietary: "reference",
   internal: "reference",
@@ -24,7 +17,6 @@ const PRIORITY_TIER_MAP: Record<LibraryPriority, SourceTier> = {
   general: "general",
 };
 
-/** Map library priority to domain score. */
 const PRIORITY_DOMAIN_SCORES: Record<LibraryPriority, number> = {
   proprietary: 95,
   internal: 90,
@@ -34,12 +26,27 @@ const PRIORITY_DOMAIN_SCORES: Record<LibraryPriority, number> = {
 
 const LOCAL_FRESHNESS_SCORE = 70;
 
+function makeLocalUrl(hit: LocalSearchHit): string {
+  const library = encodeURIComponent(hit.libraryId);
+  const relativePath = encodeURIComponent(hit.fileRelPath || hit.fileName);
+  const chunk = hit.chunkIndex + 1;
+
+  return `local://${library}/${relativePath}/chunk/${chunk}`;
+}
+
 function localHitToSearchHit(hit: LocalSearchHit): SearchHit {
-  const snippet = hit.text.slice(0, 250).replace(/\n+/g, " ").trim();
+  const snippet = hit.text
+    .slice(0, 250)
+    .replace(/\s+/g, " ")
+    .trim();
+
   return {
-    url: `local://${hit.libraryName}/${hit.fileRelPath || hit.fileName}#chunk${hit.chunkIndex}`,
-    title: `${hit.fileName} (${hit.libraryName})`,
+    url: makeLocalUrl(hit),
+    title: hit.heading
+      ? `${hit.fileName} — ${hit.heading}`
+      : `${hit.fileName} (${hit.libraryName})`,
     snippet,
+    discoveredBy: "local-rag",
   };
 }
 
@@ -50,14 +57,16 @@ function localHitToCrawledSource(
   label: string,
   contentLimit: number,
 ): CrawledSource {
-  let text = "";
+  let text = hit.text;
+
   if (hit.contextBefore) {
-    text += hit.contextBefore + "\n\n---\n\n";
+    text = `${hit.contextBefore}\n---\n${text}`;
   }
-  text += hit.text;
+
   if (hit.contextAfter) {
-    text += "\n\n---\n\n" + hit.contextAfter;
+    text = `${text}\n---\n${hit.contextAfter}`;
   }
+
   text = text.slice(0, contentLimit);
 
   const priority = hit.libraryPriority;
@@ -73,18 +82,20 @@ function localHitToCrawledSource(
         : priority === "reference"
           ? 0.05
           : 0;
+
   const relevanceScore = Math.min(1, baseRelevance + priorityBoost);
+  const localUrl = makeLocalUrl(hit);
 
   return {
-    url: `local://${hit.libraryName}/${hit.fileRelPath || hit.fileName}#chunk${hit.chunkIndex}`,
-    finalUrl: `local://${hit.libraryName}/${hit.fileRelPath || hit.fileName}#chunk${hit.chunkIndex}`,
+    url: localUrl,
+    finalUrl: localUrl,
     title: hit.heading
-      ? `${hit.fileName} - ${hit.heading} (${hit.libraryName})`
+      ? `${hit.fileName} — ${hit.heading}`
       : `${hit.fileName} (${hit.libraryName})`,
-    description: text.slice(0, 250).replace(/\n+/g, " ").trim(),
+    description: text.slice(0, 250).replace(/\s+/g, " ").trim(),
     published: null,
     text,
-    wordCount: hit.wordCount,
+    wordCount: text.split(/\s+/).filter(Boolean).length,
     outlinks: [],
     sourceQuery: query,
     workerRole: role,
@@ -93,7 +104,7 @@ function localHitToCrawledSource(
     freshnessScore: LOCAL_FRESHNESS_SCORE,
     tier,
     relevanceScore,
-    origin: "local" as const,
+    origin: "local",
   };
 }
 
@@ -103,31 +114,33 @@ export function searchLocalLibraries(
   libraryIds?: ReadonlyArray<string>,
 ): ReadonlyArray<SearchHit> {
   const store = getGlobalStore();
-  if (!store.hasLibraries()) return [];
 
-  const hits = store.search(query, maxResults, libraryIds);
-  return hits.map(localHitToSearchHit);
+  if (!store.hasLibraries) {
+    return [];
+  }
+
+  return store
+    .search(query, maxResults, libraryIds)
+    .map(localHitToSearchHit);
 }
 
 export function searchLocalForRole(
   query: string,
   role: WorkerRole,
-  maxResults: number = 8,
+  maxResults = 8,
   roleLibraryMap?: ReadonlyMap<string, ReadonlyArray<string>>,
 ): ReadonlyArray<SearchHit> {
   const store = getGlobalStore();
-  if (!store.hasLibraries()) return [];
 
-  const hits = store.searchByRole(query, role, maxResults, roleLibraryMap);
-  return hits.map(localHitToSearchHit);
+  if (!store.hasLibraries) {
+    return [];
+  }
+
+  return store
+    .searchByRole(query, role, maxResults, roleLibraryMap)
+    .map(localHitToSearchHit);
 }
 
-/**
- * Progressive harvest: searches local libraries in priority order
- * (proprietary first, then internal, reference, general).
- * This is the "progressive source approach" - proprietary knowledge
- * is preferred, web fills remaining gaps.
- */
 export function harvestLocalSources(
   queries: ReadonlyArray<string>,
   role: WorkerRole,
@@ -138,35 +151,54 @@ export function harvestLocalSources(
   roleLibraryMap?: ReadonlyMap<string, ReadonlyArray<string>>,
 ): ReadonlyArray<CrawledSource> {
   const store = getGlobalStore();
-  if (!store.hasLibraries()) return [];
+
+  if (!store.hasLibraries || maxTotal <= 0) {
+    return [];
+  }
 
   const seen = new Set<string>();
   const sources: CrawledSource[] = [];
 
-  const useProgressive = !libraryIds && !roleLibraryMap?.get(role);
+  const mappedLibraryIds = roleLibraryMap?.get(role);
+  const useProgressive =
+    !libraryIds?.length && !mappedLibraryIds?.length;
 
   for (const query of queries) {
-    if (sources.length >= maxTotal) break;
-
-    const remaining = maxTotal - sources.length;
-    let hits: ReadonlyArray<LocalSearchHit>;
-
-    if (useProgressive) {
-      hits = store.searchProgressive(query, remaining);
-    } else {
-      const targetIds = roleLibraryMap?.get(role) ?? libraryIds;
-      hits = store.search(query, remaining, targetIds);
+    if (sources.length >= maxTotal) {
+      break;
     }
 
+    const remaining = maxTotal - sources.length;
+
+    const hits = useProgressive
+      ? store.searchProgressive(query, remaining)
+      : store.search(
+          query,
+          remaining,
+          mappedLibraryIds ?? libraryIds,
+        );
+
     for (const hit of hits) {
-      if (sources.length >= maxTotal) break;
+      if (sources.length >= maxTotal) {
+        break;
+      }
 
       const dedupeKey = `${hit.filePath}:${hit.chunkIndex}`;
-      if (seen.has(dedupeKey)) continue;
+
+      if (seen.has(dedupeKey)) {
+        continue;
+      }
+
       seen.add(dedupeKey);
 
       sources.push(
-        localHitToCrawledSource(hit, query, role, label, contentLimit),
+        localHitToCrawledSource(
+          hit,
+          query,
+          role,
+          label,
+          contentLimit,
+        ),
       );
     }
   }

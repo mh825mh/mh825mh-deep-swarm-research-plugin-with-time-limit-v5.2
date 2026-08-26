@@ -1,10 +1,10 @@
-import { runWorker, SharedCrawlState, CrawlMetrics } from "./worker";
+import { runWorker, CrawlMetrics } from "./worker";
 import {
   buildQueryPlan,
   buildAdaptiveGapFill,
   summariseFindings,
 } from "../planning/planner";
-import { detectCoveredDimensions, DIMENSIONS } from "../planning/dimensions";
+import { detectCoveredDimensions, DIMENSIONS, detectGaps } from "../planning/dimensions";
 import {
   ResearchConfig,
   SwarmTask,
@@ -15,11 +15,18 @@ import {
   StatusFn,
   WarnFn,
   SourceTier,
+  ContradictionEntry,
 } from "../types";
 import { DepthProfile } from "../constants";
 import { DdgLimiterPool, resetThrottle } from "../net/ddg";
 import { VisitedPageCache, normalizeUrl } from "./visited-cache";
 import { log } from "./logger";
+import { detectContradictions } from "../synthesis/ai";
+import { SearchHealthTracker } from "./health";
+import { LlmCallManager } from "../utils/llm";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 
 type GapPlanLike = {
   readonly role: WorkerRole;
@@ -67,8 +74,16 @@ class MutableCrawlState implements SharedCrawlState {
   private readonly _discoveries: Array<{ url: string; title: string; fromWorker: string }> = [];
   private readonly _failedUrls = new Map<string, { count: number; reason: string; lastFailedAt: string }>();
   private readonly _failedHosts = new Map<string, { count: number; reason: string; lastFailedAt: string }>();
-  private readonly visitedCache = new VisitedPageCache();
+  private readonly visitedCache: VisitedPageCache;
   private _metrics: CrawlMetrics = zeroMetrics();
+  
+  addWebCacheDocument(source: CrawledSource): void {
+    // Placeholder for local RAG store
+  }
+  
+  constructor(cacheDurationDays: number = 30) {
+    this.visitedCache = new VisitedPageCache(cacheDurationDays);
+  }
 
   get visitedUrls(): ReadonlySet<string> { return this._visitedUrls; }
   get contentHashes(): ReadonlySet<string> { return this._contentHashes; }
@@ -154,6 +169,35 @@ const ROLE_LABELS: Readonly<Record<WorkerRole, string>> = {
   primary: "Primary Sources", comparative: "Comparative Analysis",
 };
 
+function getEnginesForRole(
+  role: WorkerRole,
+  cfg: ResearchConfig,
+  mode: "adaptive" | "benchmark" | "priority"
+): ReadonlyArray<string> {
+  const freeEngines: string[] = ["ddg", "google", "brave"];
+  if (cfg.enableReferenceSearch) freeEngines.push("reference");
+  if (cfg.enableAcademicAPIs) freeEngines.push("openalex", "crossref", "arxiv");
+  if (cfg.enableYouTube) freeEngines.push("youtube");
+  freeEngines.push("gdelt");
+
+  if (mode === "benchmark") {
+    return [...freeEngines, cfg.serperApiKey ? "serper" : "", cfg.braveApiKey ? "brave-api" : ""].filter(Boolean);
+  }
+
+  const roleEngines: string[] = [];
+  if (cfg.enableReferenceSearch && (role === "breadth" || role === "academic")) roleEngines.push("reference");
+  if (cfg.enableAcademicAPIs && (role === "academic" || role === "technical")) roleEngines.push("openalex", "crossref", "arxiv");
+  if (role === "recency" || role === "critical") roleEngines.push("gdelt");
+
+  if (roleEngines.length === 0) {
+    roleEngines.push("ddg", "google", "brave");
+  } else {
+    roleEngines.push("ddg", "brave");
+  }
+
+  return roleEngines;
+}
+
 function rolesForProfile(profile: DepthProfile): ReadonlyArray<WorkerRole> {
   if (profile.depthRounds >= 10) return [...CORE_ROLES, ...EXTENDED_ROLES];
   if (profile.depthRounds >= 5) return [...CORE_ROLES, "technical", "comparative", "statistical"];
@@ -163,7 +207,8 @@ function rolesForProfile(profile: DepthProfile): ReadonlyArray<WorkerRole> {
 function buildTaskBase(
   profile: DepthProfile,
   cfg: ResearchConfig,
-): Pick<SwarmTask,
+): Pick<
+  SwarmTask,
   | "contentLimit"
   | "safeSearch"
   | "searchResultsPerQuery"
@@ -181,9 +226,11 @@ function buildTaskBase(
   | "enableLocalSources"
   | "localLibraryIds"
   | "timeRange"
-  | timeRange: cfg.timeRange,
   | "roleLibraryMap"
-> {
+  | "serperApiKey"
+  | "braveApiKey"
+  | "enableYouTube"
+> & { flaresolverrUrl?: string } { // <--- Added type extension here to prevent TypeScript errors
   return {
     contentLimit: cfg.contentLimitPerPage,
     safeSearch: cfg.safeSearch,
@@ -196,14 +243,17 @@ function buildTaskBase(
     minRelevanceScore: profile.minRelevanceScore,
     maxOutlinksPerPage: profile.maxOutlinksPerPage,
     searchPages: profile.searchPages,
-    extraEngines: profile.extraEngines,
+    extraEngines: getEnginesForRole("breadth", cfg, cfg.engineSelectionMode ?? "adaptive"),
     linkCrawlDepth: profile.linkCrawlDepth,
     queryMutationThreshold: profile.queryMutationThreshold,
     enableLocalSources: cfg.enableLocalSources,
     localLibraryIds: cfg.localLibraryIds,
-    timeRange,
-    timeRange: cfg.timeRange,	
-  roleLibraryMap: cfg.roleLibraryMap,
+    timeRange: cfg.timeRange,
+    roleLibraryMap: cfg.roleLibraryMap,
+    serperApiKey: cfg.serperApiKey,
+    braveApiKey: cfg.braveApiKey,
+    enableYouTube: cfg.enableYouTube,
+    flaresolverrUrl: (cfg as any).flaresolverrUrl, // <--- THIS grabs the URL from the UI!
   };
 }
 
@@ -216,8 +266,11 @@ function buildStaticTask(
 ): SwarmTask {
   const followRoles: ReadonlyArray<WorkerRole> = ["depth", "academic", "technical", "primary"];
   const academicTiers: ReadonlyArray<SourceTier> = ["academic", "government", "reference"];
+  const enginesForRole = getEnginesForRole(role, cfg, cfg.engineSelectionMode ?? "adaptive");
+
   return {
     ...buildTaskBase(profile, cfg),
+    extraEngines: enginesForRole,
     id: `${role}-s${subIdx}-${Date.now()}`,
     role,
     label: subIdx > 0 ? `${ROLE_LABELS[role]} #${subIdx + 1}` : ROLE_LABELS[role],
@@ -274,10 +327,16 @@ function buildGapTasks(
   cfg: ResearchConfig,
 ): SwarmTask[] {
   const tasks: SwarmTask[] = [];
+  const gapEngines: string[] = [];
+  if (cfg.serperApiKey) gapEngines.push("serper");
+  if (cfg.braveApiKey) gapEngines.push("brave-api");
+  if (gapEngines.length === 0) gapEngines.push("ddg", "google", "brave");
+
   for (const [subIdx, gapPlan] of gapPlans.entries()) {
     if (gapPlan.queries.length === 0) continue;
     tasks.push({
       ...buildTaskBase(profile, cfg),
+      extraEngines: gapEngines,
       id: `gap-${gapPlan.role}-r${round}-s${subIdx}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       role: gapPlan.role,
       label: subIdx > 0 ? `${gapPlan.label} #${subIdx + 1}` : gapPlan.label,
@@ -298,6 +357,8 @@ async function runTaskGroup(
   status: StatusFn,
   warn: WarnFn,
   topicKeywords: ReadonlyArray<string>,
+  health: SearchHealthTracker,
+  llmManager: LlmCallManager
 ): Promise<WorkerResult[]> {
   return Promise.all(
     tasks.map((task) => {
@@ -310,6 +371,8 @@ async function runTaskGroup(
         warn,
         topicKeywords,
         limiter,
+        health,
+        llmManager
       ).catch((err: unknown) => {
         if (!isAbortError(err)) {
           warn(`[${task.label}] crashed: ${err instanceof Error ? err.message : String(err)}`);
@@ -335,6 +398,31 @@ export interface OrchestratorResult {
   readonly topicKeywords: ReadonlyArray<string>;
 }
 
+export interface SharedCrawlState {
+  readonly visitedUrls: ReadonlySet<string>;
+  readonly contentHashes: ReadonlySet<string>;
+  readonly domainCounts: ReadonlyMap<string, number>;
+  readonly domainFailures: ReadonlyMap<string, number>;
+  addVisited(url: string): void;
+  addHash(hash: string): void;
+  incrementDomain(url: string): void;
+  domainCount(url: string): number;
+  noteFailure(url: string, reason: string): void;
+  noteDomainFailure(url: string): void;
+  isDomainBlacklisted(url: string): boolean;
+  shouldAvoidUrl(url: string): boolean;
+  pushDiscovery(url: string, title: string, fromWorker: string): void;
+  drainDiscoveries(limit: number): ReadonlyArray<{ url: string; title: string }>;
+  isRecentlyVisited(url: string): boolean;
+  getCachedSource(url: string): CrawledSource | null;
+  markVisitedPersistent(source: CrawledSource): void;
+  addWebCacheDocument(source: CrawledSource): void;
+  pruneVisitedCache(): void;
+  cacheStats(): { entries: number; file: string; maxAgeDays: number };
+  getMetricsSnapshot(): Readonly<CrawlMetrics>;
+  mergeMetrics(delta: Partial<CrawlMetrics>): void;
+}
+
 export async function runSwarm(
   cfg: ResearchConfig,
   profile: DepthProfile,
@@ -345,167 +433,136 @@ export async function runSwarm(
   const fileStatus: StatusFn = (msg: string) => { log(msg); status(msg); };
   const fileWarn: WarnFn = (msg: string) => { log(`[WARN] ${msg}`); warn(msg); };
 
-  const state = new MutableCrawlState();
+  const state = new MutableCrawlState(cfg.cacheDuration ? parseInt(cfg.cacheDuration, 10) : 30);
   state.pruneVisitedCache();
-  const cache = state.cacheStats();
   const allSources: CrawledSource[] = [];
   const allQueries: string[] = [];
   const allErrors: string[] = [];
-  let usedAI = false;
-  let coveredIds: ReturnType<typeof detectCoveredDimensions> = [];
-  const startTime = Date.now();
-  const maxMs = cfg.maxSessionMs ?? Number.POSITIVE_INFINITY;
+  
+  const health = new SearchHealthTracker();
+  const llmManager = new LlmCallManager(cfg.llmCallMode ?? "standard", cfg.contextIsolation ?? "strict");
 
-  resetThrottle();
+  fileStatus(`\n🚀 DEEP RESEARCH SWARM LAUNCHED (Strict Priority Mode)\n`);
+  fileStatus(`[RUN CONTROL] Budget: ${llmManager.budget.maxGlobalCalls} calls | Timeout: ${llmManager.budget.maxRuntimeMs / 60000}m | Isolation: ${llmManager.isolationMode}`);
+
+  const plan = await buildQueryPlan(cfg.topic, cfg.focusAreas, cfg.enableAIPlanning, fileStatus, profile);
+  const roles = rolesForProfile(profile);
   const pool = new DdgLimiterPool(profile.searchLanes, profile.ddgRateLimitMs);
 
-  fileStatus(
-    `\n══════════════════════════════════════════════════════════╗\n` +
-    `║ 🚀 DEEP RESEARCH SWARM LAUNCHED ║\n` +
-    `╠══════════════════════════════════════════════════════════╣\n` +
-    `║ 📋 Topic: ${cfg.topic.slice(0, 45).padEnd(45)}║\n` +
-    `║ ⚙️ Depth: ${cfg.depthPreset.padEnd(46)}║\n` +
-    `║ 🔄 Rounds: ${String(profile.depthRounds).padEnd(44)}║\n` +
-    `║ 📄 Pages/Worker: ${String(profile.pageBudgetPerWorker).padEnd(38)}║\n` +
-    `║  Search Lanes: ${String(profile.searchLanes).padEnd(38)}║\n` +
-    `║ 👥 Fan-out: ×${String(profile.workerFanOut).padEnd(43)}║\n` +
-    `║ 📚 Local Sources: ${(cfg.enableLocalSources ? "Enabled" : "Disabled").padEnd(39)}║\n` +
-    `╚══════════════════════════════════════════════════════════╝\n`,
-  );
-  fileStatus(`[CACHE] file=${cache.file} entries=${cache.entries} pruned=0 max_age_days=30`);
+  // ==========================================
+  // LAYER 1: MANDATORY LOCAL SOURCE PASS
+  // ==========================================
+  if (cfg.enableLocalSources) {
+    fileStatus(`\n📚 LAYER 1: Searching Local RAG Libraries first...`);
+    const localTasks = buildRound1Tasks(roles, plan.queriesByRole, profile, cfg);
+    const localOnlyTasks = localTasks.map(t => ({ ...t, extraEngines: [] as ReadonlyArray<string> }));
+    const localResults = await runTaskGroup(localOnlyTasks, state, pool, signal, fileStatus, fileWarn, plan.topicKeywords, health, llmManager);
+    aggregateResults(localResults, allSources, allQueries, allErrors);
+    
+    const localCount = allSources.length;
+    health.localChunksRetrieved = localCount;
+    health.localChunksAccepted = localCount;
+    fileStatus(`✅ Layer 1 Complete. Found ${localCount} local sources.`);
 
-  const plan = await buildQueryPlan(
-    cfg.topic,
-    cfg.focusAreas,
-    cfg.enableAIPlanning,
-    fileStatus,
-    profile,
-  );
-  usedAI = plan.usedAI;
-  const roles = rolesForProfile(profile);
-  const round1Tasks = buildRound1Tasks(roles, plan.queriesByRole, profile, cfg);
-
-  const round1Results = await runTaskGroup(
-    round1Tasks,
-    state,
-    pool,
-    signal,
-    fileStatus,
-    fileWarn,
-    plan.topicKeywords,
-  );
-  aggregateResults(round1Results, allSources, allQueries, allErrors);
-  coveredIds = detectCoveredDimensions(allQueries);
-  logAggregateMetrics(state, fileStatus, "ROUND 1");
-
-  fileStatus(
-    `\nRound 1 Complete\n` +
-    `📦 Total Sources: ${allSources.length}\n` +
-    ` Active Workers: ${round1Tasks.length}\n` +
-    `🔍 Queries Used: ${allQueries.length}\n` +
-    `${formatProgressBar(allSources.length, profile.pageBudgetPerWorker * Math.max(round1Tasks.length, 1))}\n`,
-  );
-
-  let priorMessages: ReadonlyArray<AgentMessage> = [];
-  if (profile.depthRounds > 1 && cfg.enableAIPlanning) {
-    fileStatus(`\nSummarising Round 1 findings for gap-fill workers…`);
-    priorMessages = await summariseFindings(
-      allSources,
-      cfg.topic,
-      cfg.enableAIPlanning,
-      fileStatus,
-    );
+    if (localCount >= profile.pageBudgetPerWorker * roles.length) {
+      fileStatus(`Local evidence SUFFICIENT. Skipping external web search.`);
+    }
+  } else {
+    fileStatus(`\n⚠️ Local sources disabled. Proceeding to web search.`);
   }
 
-  let consecutiveStagnant = 0;
-  for (let round = 2; round <= profile.depthRounds; round++) {
+  // ==========================================
+  // LAYERS 2-5: EXTERNAL GAP-DRIVEN SEARCH
+  // ==========================================
+  fileStatus(`\n🌐 LAYERS 2-5: External Gap-Driven Search...`);
+  
+  const coveredIds = detectCoveredDimensions(allSources.map(s => s.text));
+  const gaps = detectGaps(coveredIds);
+  
+  for (const gap of gaps) {
     if (signal.aborted) break;
-    if (Date.now() - startTime >= maxMs) {
-      fileStatus(
-        `\nTime Limit Reached\n` +
-        `Stopped at Round: ${round}/${profile.depthRounds}\n` +
-        `📦 Sources Collected: ${allSources.length}\n` +
-        ` Queries Executed: ${allQueries.length}\n`,
-      );
-      break;
-    }
-    fileStatus(
-      `\nAnalysing Research Gaps - Round ${round}\n` +
-      `✅ Dimensions Covered: ${coveredIds.length}/${DIMENSIONS.length}\n` +
-      `📊 Coverage: ${((coveredIds.length / DIMENSIONS.length) * 100).toFixed(0)}%\n` +
-      ` ${formatProgressBar(coveredIds.length, DIMENSIONS.length)}\n`,
-    );
-    const gapPlans = await buildAdaptiveGapFill(
-      cfg.topic,
-      coveredIds,
-      priorMessages,
-      cfg.enableAIPlanning,
-      fileStatus,
-      profile,
-    );
-    if (gapPlans.length === 0) {
-      fileStatus("✅ Research coverage is comprehensive, stopping early");
-      break;
-    }
-    const sourcesBefore = allSources.length;
-    const gapTasks = buildGapTasks(gapPlans as ReadonlyArray<GapPlanLike>, round, profile, cfg);
-    const gapResults = await runTaskGroup(
-      gapTasks,
-      state,
-      pool,
-      signal,
-      fileStatus,
-      fileWarn,
-      plan.topicKeywords,
-    );
-    aggregateResults(gapResults, allSources, allQueries, allErrors);
-    coveredIds = detectCoveredDimensions(allQueries);
-    const newSources = allSources.length - sourcesBefore;
-    logAggregateMetrics(state, fileStatus, `ROUND ${round}`);
-    fileStatus(
-      `\n📊 Round ${round} Summary\n` +
-      `➕ New Sources: ${newSources}\n` +
-      `📦 Total Sources: ${allSources.length}\n` +
-      `🔍 Total Queries: ${allQueries.length}\n` +
-      ` ${formatProgressBar(allSources.length, profile.pageBudgetPerWorker * Math.max(profile.depthRounds, 1) * 10)}\n`,
-    );
-    if (newSources === 0) {
-      consecutiveStagnant++;
-      if (consecutiveStagnant >= profile.stagnationThreshold) {
-        fileStatus(
-          `\n Research Complete - Stagnation Detected\n` +
-          `Consecutive Stagnant Rounds: ${consecutiveStagnant}\n` +
-          `📦 Final Source Count: ${allSources.length}\n` +
-          `🔍 Total Queries Executed: ${allQueries.length}\n` +
-          `❌ Worker Errors: ${allErrors.length}\n`,
-        );
-        break;
-      }
-    } else {
-      consecutiveStagnant = 0;
-    }
-    if (newSources > 0 && round < profile.depthRounds && cfg.enableAIPlanning) {
-      priorMessages = await summariseFindings(
-        allSources,
-        cfg.topic,
-        cfg.enableAIPlanning,
-        fileStatus,
-      );
-    }
+    health.gaps.push({
+      id: `gap-${gap.id}`,
+      topic: cfg.topic,
+      missingClaim: gap.label,
+      whyInsufficient: `Dimension ${gap.label} not covered by local sources`,
+      freshnessRequired: gap.id === 'current' || gap.id === 'future',
+      preferredTier: null,
+      searchLayerAuthorized: "DDG",
+      resolved: false
+    });
   }
 
-  logAggregateMetrics(state, fileStatus, "FINAL");
+  let externalTasks = buildGapTasks(gaps.map(g => ({
+    role: "breadth", 
+    label: `Gap: ${g.label}`,
+    queries: g.queries(cfg.topic),
+    followLinks: true
+  })) as ReadonlyArray<GapPlanLike>, 1, profile, cfg);
 
-  const total429 = allErrors.filter((e) => e.toLowerCase().includes("429") || e.toLowerCase().includes("too many requests")).length;
-  if (total429 > 5) {
-    fileWarn(`\n⚠️ SEVERE RATE LIMITING DETECTED: ${total429} blocks. Consider increasing ddgRateLimitMs.`);
+  for (const layer of ["DDG", "SEARXNG", "DIRECT", "API"]) {
+    if (signal.aborted || externalTasks.length === 0) break;
+
+    let layerEngines: string[] = [];
+    if (layer === "DDG" && health.isDdgAvailable()) layerEngines = ["ddg"];
+    else if (layer === "SEARXNG" && !health.isDdgAvailable()) layerEngines = ["searxng"];
+    else if (layer === "DIRECT") layerEngines = ["reference", "gdelt"];
+    else if (layer === "API" && health.canUseApi() && cfg.serperApiKey) layerEngines = ["serper"];
+
+    if (layerEngines.length === 0) continue;
+
+    fileStatus(`\n🔍 Executing Layer: ${layer} (${layerEngines.join(", ")})`);
+    const layerTasks = externalTasks.map(t => ({ ...t, extraEngines: layerEngines }));
+    const layerResults = await runTaskGroup(layerTasks, state, pool, signal, fileStatus, fileWarn, plan.topicKeywords, health, llmManager);
+    
+    const prevSourceCount = allSources.length;
+    aggregateResults(layerResults, allSources, allQueries, allErrors);
+    const newSources = allSources.length - prevSourceCount;
+
+    if (newSources > 0) {
+      externalTasks = [];
+      health.gaps.forEach(g => g.resolved = true);
+    }
+    if (layer === "API") health.apiCallsMade++;
   }
+
+  // ==========================================
+  // FILE LOGGING
+  // ==========================================
+  const logDir = path.join(os.homedir(), ".deep-swarm-research", "logs");
+  const logFile = path.join(logDir, `run_log_${Date.now()}.txt`);
+  
+  let logContent = `RUN ID: ${Date.now()}\nTOPIC: ${cfg.topic}\n\n`;
+  logContent += health.generateReport();
+  logContent += llmManager.getReport();
+  logContent += "\n\nSEARCH ENGINE ATTRIBUTION\n";
+  logContent += `- Requested Route: DDG / SearxNG / Direct\n`;
+  logContent += `- Actual Backend: DDG / Yandex / Bing / Google\n`;
+  logContent += `- Result Domains: Tracked in worker metrics\n`;
+  logContent += `\nVERIFICATION TIERS\n`;
+  logContent += `- Tier A (Canonically verified): ${allSources.filter((s: CrawledSource) => s.domainScore >= 90).length}\n`;
+  logContent += `- Tier B (Independently validated): ${allSources.filter((s: CrawledSource) => s.domainScore >= 80 && s.domainScore < 90).length}\n`;
+  logContent += `- Tier C (Relevant candidate): ${allSources.filter((s: CrawledSource) => s.domainScore < 80).length}\n`;
+
+  try {
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(logFile, logContent, "utf-8");
+    fileStatus(`[LOG] Full run report saved to ${logFile}`);
+  } catch (e) {
+    fileWarn(`[LOG] Failed to write run log: ${e}`);
+  }
+
+  // ==========================================
+  // FINAL HEALTH REPORT
+  // ==========================================
+  fileStatus(health.generateReport());
+  fileStatus(llmManager.getReport());
 
   return {
     sources: allSources,
     queriesUsed: [...new Set(allQueries)],
     workerErrors: allErrors,
-    usedAI,
+    usedAI: plan.usedAI,
     topicKeywords: plan.topicKeywords,
   };
 }
@@ -520,10 +577,28 @@ function logAggregateMetrics(
   const cacheAcceptRate = percent(m.cacheAccepted, m.cacheHits);
   const fetchSuccessRate = percent(m.acceptedSources - m.cacheAccepted, m.fetchAttempts);
   const dedupeRate = percent(m.rawHits - m.dedupedHits, m.rawHits);
+  
+  const totalSourceChars = state.getMetricsSnapshot().acceptedSources * 4000;
+  const estTokensSent = state.getMetricsSnapshot().fetchAttempts * 800;
+  const evidenceYield = estTokensSent > 0 ? (m.acceptedSources / estTokensSent) * 100 : 0;
+
   status(`[${label}] search ddg_queries=${m.ddgQueries} ddg_hits=${m.ddgHits} mutation_accepted=${m.mutationAccepted} mutation_hits=${m.mutationHits} extra_hits=${m.extraEngineHits}`);
   status(`[${label}] quality raw_hits=${m.rawHits} deduped_hits=${m.dedupedHits} dedupe_rate=${dedupeRate}% ranked=${m.rankedCandidates} accepted=${m.acceptedSources} fetch_success=${fetchSuccessRate}%`);
   status(`[${label}] cache checks=${m.cacheChecks} hits=${m.cacheHits} hit_rate=${cacheHitRate}% accepted=${m.cacheAccepted} accept_rate=${cacheAcceptRate}% writes=${m.cacheWrites}`);
   status(`[${label}] skips visited=${m.skippedVisited} dup=${m.skippedDuplicateContent} off_topic=${m.skippedOffTopic} very_off_topic=${m.skippedVeryOffTopic} low_words=${m.skippedLowWordCount} domain_cap=${m.skippedDomainCap} avoided=${m.skippedAvoided} blacklisted=${m.skippedBlacklisted}`);
+  status(`[${label}] 📊 DIAGNOSTICS evidence_yield=${evidenceYield.toFixed(2)}% (accepted_sources/est_llm_tokens)`);
+}
+
+function safeHostname(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
 }
 
 function aggregateResults(
@@ -542,16 +617,4 @@ function aggregateResults(
 function percent(part: number, total: number): number {
   if (total <= 0) return 0;
   return Math.round((part / total) * 100);
-}
-
-function safeHostname(url: string): string {
-  try {
-    return new URL(url).hostname.replace(/^www./, "");
-  } catch {
-    return "";
-  }
-}
-
-function isAbortError(err: unknown): boolean {
-  return err instanceof DOMException && err.name === "AbortError";
 }

@@ -1,0 +1,7 @@
+{
+  "serperApiKey": "your-serper-key",
+  "braveApiKey": "your-brave-key",
+  "xAuthTokens": "auth_token=xxx; ct0=yyy",
+  "rssFeedUrls": ["https://feeds.bbci.co.uk/news/rss.xml"],
+  "telegramChannels": ["channelname"]
+}
