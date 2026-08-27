@@ -299,38 +299,33 @@ export function computeRelevance(
   topicKws: ReadonlyArray<string>,
 ): number {
   if (topicKws.length === 0) return 0.5;
+
   const lowerText = text.toLowerCase();
   const lowerTitle = title.toLowerCase();
   const lowerSnippet = snippet.toLowerCase();
   const lowerKws = topicKws.map((k) => k.toLowerCase());
 
-  const textHits = lowerKws.filter((kw) => lowerText.includes(kw)).length;
-  let score = textHits / lowerKws.length;
+  // Count primary topic keyword occurrences
+  const matchedKws = lowerKws.filter((kw) => lowerText.includes(kw));
+  if (matchedKws.length === 0) return 0.0; // Immediate reject if zero core keywords match
 
-  const titleHits = lowerKws.filter((kw) => lowerTitle.includes(kw)).length;
-  score += (titleHits / lowerKws.length) * RELEVANCE_TITLE_BONUS;
+  let score = matchedKws.length / lowerKws.length;
 
-  const snippetHits = lowerKws.filter((kw) => lowerSnippet.includes(kw)).length;
-  score += (snippetHits / lowerKws.length) * RELEVANCE_SNIPPET_BONUS;
+  // Heavy weighting for title and snippet matches
+  const titleMatches = lowerKws.filter((kw) => lowerTitle.includes(kw)).length;
+  score += (titleMatches / lowerKws.length) * RELEVANCE_TITLE_BONUS;
 
-  const densityText = lowerText.slice(0, 8000);
-  let totalOccurrences = 0;
-  for (const kw of lowerKws) {
-    let idx = 0;
-    while ((idx = densityText.indexOf(kw, idx)) !== -1) {
-      totalOccurrences++;
-      idx += kw.length;
-    }
-  }
+  const snippetMatches = lowerKws.filter((kw) => lowerSnippet.includes(kw)).length;
+  score += (snippetMatches / lowerKws.length) * RELEVANCE_SNIPPET_BONUS;
 
-  const densityWordCount = densityText.split(/\s+/).length;
-  const density = Math.min(1, (totalOccurrences / Math.max(1, densityWordCount)) * 10);
-  score += density * 0.1;
+  // Penalize off-topic noise keywords (e.g., LLMs, SEO linkfarms, gaming streams)
+  const noiseTerms = ["subscribe", "newsletter", "discord", "livestream", "affiliate link", "chatgpt", "large language model"];
+  const noiseHits = noiseTerms.filter((term) => lowerText.includes(term)).length;
+  if (noiseHits > 3) score *= 0.6;
 
-  const urlCount = (text.match(/https?:\/\/[^\s)]+/g) || []).length;
   const wordCount = text.split(/\s+/).length;
-  const urlDensity = urlCount / Math.max(1, wordCount);
-  if (urlDensity > 0.05) score *= 0.5;
+  const urlCount = (text.match(/https?:\/\/[^\s)]+/g) || []).length;
+  if (urlCount / Math.max(1, wordCount) > 0.05) score *= 0.4;
 
   return Math.min(1, Math.max(0, score));
 }

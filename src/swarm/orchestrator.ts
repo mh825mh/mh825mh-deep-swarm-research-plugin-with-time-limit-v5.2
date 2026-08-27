@@ -500,8 +500,15 @@ export async function runSwarm(
     followLinks: true
   })) as ReadonlyArray<GapPlanLike>, 1, profile, cfg);
 
+  const maxSessionTimeMs = cfg.maxSessionMs || 30 * 60 * 1000;
+  const startTime = Date.now();
+  const crawlDeadline = startTime + (maxSessionTimeMs * 0.80); // Reserve 20% for synthesis
+
   for (const layer of ["DDG", "SEARXNG", "DIRECT", "API"]) {
-    if (signal.aborted || externalTasks.length === 0) break;
+    if (Date.now() >= crawlDeadline || signal.aborted || externalTasks.length === 0) {
+      fileWarn(`[TIME ALLOCATION] Crawl budget elapsed or tasks finished. Transitioning to verification & synthesis.`);
+      break;
+    }
 
     let layerEngines: string[] = [];
     if (layer === "DDG" && health.isDdgAvailable()) layerEngines = ["ddg"];
@@ -521,10 +528,21 @@ export async function runSwarm(
 
     if (newSources > 0) {
       externalTasks = [];
-      health.gaps.forEach(g => g.resolved = true);
+      health.gaps.forEach(g => { g.resolved = true; });
     }
     if (layer === "API") health.apiCallsMade++;
   }
+
+  // Cap Sources to Top-N before logging and passing to synthesis
+  const sortedSources = [...allSources].sort((a, b) => {
+    const scoreA = (a.domainScore * 0.4) + (a.relevanceScore * 100 * 0.6);
+    const scoreB = (b.domainScore * 0.4) + (b.relevanceScore * 100 * 0.6);
+    return scoreB - scoreA;
+  });
+
+  // Reassign allSources to the filtered top results
+  allSources.length = 0; 
+  allSources.push(...sortedSources.slice(0, profile.synthesisMaxSources || 25));
 
   // ==========================================
   // FILE LOGGING

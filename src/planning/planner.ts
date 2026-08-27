@@ -178,30 +178,31 @@ function makeRolePlanPrompt(
   profile: DepthProfile,
 ): string {
   const roleDescriptions: Readonly<Record<WorkerRole, string>> = {
-    breadth: "broad coverage - many different angles, facts, and sub-topics",
-    depth: "deep dive - mechanisms, how it works, technical detail, and evidence",
-    recency: "recent developments - 2024-2026+ news, updates, and latest research",
-    academic: "academic and scientific sources - peer-reviewed studies, journals, authoritative papers",
-    critical: "critical analysis - limitations, counterarguments, criticism, controversy, drawbacks",
-    statistical: "statistics and data - numbers, percentages, datasets, surveys, market sizes, quantitative evidence",
-    regulatory: "regulatory and policy - laws, regulations, government policies, compliance, standards, guidelines",
-    technical: "technical deep-dive - implementation details, specifications, architecture, engineering approaches",
-    primary: "primary sources - original reports, official statements, first-hand accounts, press releases, white papers",
-    comparative: "comparative analysis - vs alternatives, head-to-head comparisons, benchmarks, trade-offs, pros and cons",
+    breadth: "broad coverage - primary facts, key individuals, organizations, and canonical entities",
+    depth: "deep dive - experimental methodologies, field investigations, and primary case data",
+    recency: "recent developments - publications, peer reviews, and verifiable records from 2024-2026",
+    academic: "academic papers - peer-reviewed studies, university archives, and institutional research",
+    critical: "skeptical analysis - methodological critiques, counter-arguments, fraud investigations, and alternative explanations",
+    statistical: "statistics and quantitative findings - sample sizes, replication rates, and surveys",
+    regulatory: "governing standards, institutional positions, and formal guidelines",
+    technical: "technical mechanisms and specific evaluation frameworks",
+    primary: "primary documentation - field notes, first-hand interviews, and official recordings",
+    comparative: "comparative models - alternative scientific, physiological, or psychological hypotheses",
   };
-  const focus = focusAreas.length
-    ? `\nFocus especially on: ${focusAreas.join(", ")}`
-    : "";
-  return `You are an expert Google searcher planning queries for a specialised research agent.
-Topic: "${topic}"${focus}
-This agent's role: ${roleDescriptions[role]}
 
-Generate exactly ${profile.maxQueriesPerWorker} highly specific, diverse search queries for this role.
+  const focus = focusAreas.length ? `\nFocus areas: ${focusAreas.join(", ")}` : "";
 
-Rules:
-1. DO NOT just append words to the topic string. (BAD: "${topic} statistics data")
-2. Use natural human search language. (GOOD: "how many people believe in reincarnation statistics")
-3. Return ONLY the queries, one per line, no numbering, no punctuation, no extra text.
+  return `You are an expert investigative search planner.
+Target Topic: "${topic}"${focus}
+Assigned Role: ${roleDescriptions[role]}
+
+Generate exactly ${profile.maxQueriesPerWorker} precision search queries.
+
+STRICT QUERY RULES:
+1. Target canonical entities, notable researchers, research institutes, and key published works directly.
+2. If the topic is empirical/scientific, append negative terms when appropriate (e.g., -livestream -forum -llm) to filter junk.
+3. If this role is "critical", explicitly hunt for critiques, failed replications, and skeptics.
+4. Output ONLY the queries, one per line. No numbering, quotes, or Markdown formatting.
 
 Queries:`;
 }

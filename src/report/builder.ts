@@ -13,7 +13,8 @@ import {
   EvidenceCard,
   ContextBudget,
   EntityMetadata,
-  VerificationTier
+  VerificationTier,
+  ClaimStrength // <--- ADD THIS
 } from "../types";
 import { DIMENSIONS, detectCoveredDimensions } from "../planning/dimensions";
 import { synthesiseReport, detectContradictions } from "../synthesis/ai";
@@ -270,29 +271,28 @@ export async function buildReport(
     const p = profile ?? defaultProfile;
 
     
-        // Extract evidence cards with Entity Metadata and Verification Tiers
+     // Inside buildReport() mapping evidence cards:
     const evidence: EvidenceCard[] = sources.map((s, i) => {
       const domain = safeHostname(s.url);
-      const isOfficial = s.domainScore >= 90; // Heuristic: High domain score = official/publisher
+      const isOfficial = s.domainScore >= 90;
       
-      // Basic Entity Metadata Extraction (deterministic)
-      const metadata: EntityMetadata = {
-        author: s.title.split(" by ")[1] || undefined,
-        publisher: domain,
-        officialUrl: s.url,
-        riskSubdomain: s.text.toLowerCase().includes("cyber") ? "Cyber" : "General",
-      };
+      // Determine claim strength classification
+      let claimStrength: ClaimStrength = "speculation";
+      const lower = s.text.toLowerCase();
+      if (s.tier === "academic" || isOfficial) {
+        claimStrength = lower.includes("peer-reviewed") || lower.includes("controlled study") ? "documented" : "disputed";
+      } else if (lower.includes("interview") || lower.includes("case study") || lower.includes("account")) {
+        claimStrength = "anecdote";
+      }
 
-      // Calculate Split Scores
-      const metadataConfidence = isOfficial ? 1.0 : 0.5;
-      const topicFit = Math.min(1.0, s.relevanceScore * 1.5);
-      const recommendationStrength = (metadataConfidence * 0.5) + (topicFit * 0.5);
+      const metadataConfidence = isOfficial ? 1.0 : 0.6;
+      const topicFit = s.relevanceScore;
+      const recommendationStrength = (metadataConfidence * 0.4) + (topicFit * 0.6);
 
-      // Determine Verification Tier
-      let tier: VerificationTier = "C"; // Default to Relevant Candidate
+      let tier: VerificationTier = "C";
       if (isOfficial && recommendationStrength > 0.7) tier = "A";
-      else if (recommendationStrength > 0.5) tier = "B";
-      if (s.relevanceScore < 0.2) tier = "REJECTED";
+      else if (recommendationStrength > 0.45) tier = "B";
+      if (s.relevanceScore < 0.25) tier = "REJECTED";
 
       return {
         id: `E${i+1}`,
@@ -301,16 +301,17 @@ export async function buildReport(
         authorOrHost: domain,
         canonicalUrl: s.url,
         sourceTier: s.tier,
-        relevantClaim: s.description || s.text.slice(0, 100),
+        relevantClaim: s.description || s.text.slice(0, 120),
         supportingExcerpt: s.text.slice(0, 300).replace(/\n+/g, " ").trim(),
-        confidence: s.relevanceScore > 0.6 ? "High" : s.relevanceScore > 0.3 ? "Medium" : "Low",
+        confidence: s.relevanceScore > 0.6 ? "High" : s.relevanceScore > 0.35 ? "Medium" : "Low",
+        claimStrength,
         freshness: s.published,
         worker: s.workerLabel,
         verificationTier: tier,
         metadataConfidence,
         topicFit,
         recommendationStrength,
-        entityMetadata: metadata
+        entityMetadata: { publisher: domain, officialUrl: s.url },
       };
     });
 

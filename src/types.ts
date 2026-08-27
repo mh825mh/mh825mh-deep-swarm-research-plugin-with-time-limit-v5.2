@@ -2,7 +2,18 @@ export interface SearchHit {
   readonly title: string;
   readonly url: string;
   readonly snippet: string;
-  readonly discoveredBy?: string; // ADDED: Engine attribution
+  readonly discoveredBy?: string;
+  readonly requestedRoute?: string;
+  readonly actualBackend?: string;
+  readonly resultDomain?: string;
+}
+
+export type VerificationTier = "A" | "B" | "C" | "REJECTED";
+export type ClaimStrength = "documented" | "disputed" | "anecdote" | "speculation";
+
+export interface Outlink {
+  readonly text: string;
+  readonly href: string;
 }
 
 export interface ExtractedPage {
@@ -16,6 +27,46 @@ export interface ExtractedPage {
   readonly outlinks: ReadonlyArray<Outlink>;
   readonly page?: number;
   readonly totalPages?: number;
+}
+
+export interface EntityMetadata {
+  canonicalEntities?: ReadonlyArray<string>;
+  author?: string;
+  publisher?: string;
+  officialUrl?: string;
+  isSkepticOrReplication?: boolean;
+}
+
+export interface EvidenceCard {
+  readonly id: string;
+  readonly entityType: "book" | "podcast" | "standard" | "article" | "local document" | "web";
+  readonly title: string;
+  readonly authorOrHost: string;
+  readonly canonicalUrl: string;
+  readonly sourceTier: SourceTier;
+  readonly relevantClaim: string;
+  readonly supportingExcerpt: string;
+  readonly confidence: "High" | "Medium" | "Low";
+  readonly claimStrength: ClaimStrength;
+  readonly freshness: string | null;
+  readonly worker: string;
+  readonly verificationTier: VerificationTier;
+  readonly metadataConfidence: number;
+  readonly topicFit: number;
+  readonly recommendationStrength: number;
+  readonly entityMetadata: EntityMetadata;
+}
+
+export interface CompiledReport {
+  readonly markdown: string;
+  readonly sources: ReadonlyArray<ReportSource>;
+  readonly topicKeywords: ReadonlyArray<string>;
+  readonly coveredDims: ReadonlyArray<string>;
+  readonly gapDims: ReadonlyArray<string>;
+  readonly aiSynthesis?: string;
+  readonly contradictions: ReadonlyArray<ContradictionEntry>;
+  readonly isPartialRun?: boolean;
+  readonly timeoutReason?: string;
 }
 
 export interface Outlink {
@@ -308,49 +359,6 @@ export interface SearchHit {
   readonly requestedRoute?: string; // "DDG", "SearxNG", "Direct"
   readonly actualBackend?: string;  // "DDG", "Yandex", "Bing"
   readonly resultDomain?: string;   // "cambridge.org", "orx.org"
-}
-
-// Verification Tiers
-export type VerificationTier = "A" | "B" | "C" | "REJECTED";
-
-export interface EntityMetadata {
-  // Books
-  author?: string;
-  publisher?: string;
-  edition?: string;
-  year?: string;
-  isbn?: string;
-  // Podcasts
-  host?: string;
-  rssUrl?: string;
-  latestEpisodeDate?: string;
-  distributionPlatform?: string;
-  // General
-  officialUrl?: string;
-  independentValidationUrl?: string;
-  riskSubdomain?: string;
-  audienceFit?: string;
-}
-
-export interface EvidenceCard {
-  readonly id: string;
-  readonly entityType: "book" | "podcast" | "standard" | "article" | "local document" | "web";
-  readonly title: string;
-  readonly authorOrHost: string;
-  readonly canonicalUrl: string;
-  readonly sourceTier: SourceTier;
-  readonly relevantClaim: string;
-  readonly supportingExcerpt: string;
-  readonly confidence: "High" | "Medium" | "Low";
-  readonly freshness: string | null;
-  readonly worker: string;
-  
-  // New Verification Fields
-  readonly verificationTier: VerificationTier;
-  readonly metadataConfidence: number; // 0.0 - 1.0
-  readonly topicFit: number;           // 0.0 - 1.0
-  readonly recommendationStrength: number; // 0.0 - 1.0
-  readonly entityMetadata: EntityMetadata;
 }
 
 export type StatusFn = (message: string) => void;

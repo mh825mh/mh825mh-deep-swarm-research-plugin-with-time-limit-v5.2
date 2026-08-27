@@ -1,0 +1,44 @@
+[33mcommit 0339714114bbfe7d9054ce505144cad4507d4eb6[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m
+Author: Martin Hurta <mh825mh@gmail.com>
+Date:   Thu Aug 27 00:30:30 2026 +0100
+
+    Release v5.3.2: Multi-tier waterfall fetcher, FlareSolverr Cloudflare bypass, DOM parser crash fix, and AI query planner overhaul
+
+ README.md                    |  562 [32m++[m[31m-------[m
+ gh                           |    0
+ manifest.json                |    2 [32m+[m[31m-[m
+ package-lock.json            | 2638 [32m++++++++++++++++++++++++++[m[31m----------------[m
+ package.json                 |   58 [32m+[m[31m-[m
+ src/api-keys.json            |    7 [32m+[m
+ src/config.ts                |  214 [32m+++[m[31m-[m
+ src/config/keys.ts           |   63 [32m+[m
+ src/constants.ts             |   50 [32m+[m[31m-[m
+ src/index.ts                 |    2 [32m+[m[31m-[m
+ src/local/search.ts          |  152 [32m++[m[31m-[m
+ src/local/store.ts           |  324 [32m++++[m[31m--[m
+ src/net/api-engines.ts       |  317 [32m+++++[m
+ src/net/ddg.ts               |   61 [32m+[m[31m-[m
+ src/net/extractor.ts         |  183 [32m+[m[31m--[m
+ src/net/http.ts              |  341 [32m++[m[31m----[m
+ src/net/rss-engine.ts        |   41 [32m+[m
+ src/net/search-engines.ts    |  509 [32m+++[m[31m-----[m
+ src/net/social-engines.ts    |  169 [32m+++[m
+ src/net/waterfallFetcher.ts  |  101 [32m++[m
+ src/net/youtube-extractor.ts |  110 [32m++[m
+ src/package.json             |   20 [32m+[m[31m-[m
+ src/planning/planner.ts      |  117 [32m+[m[31m-[m
+ src/report/builder.ts        |   74 [32m+[m[31m-[m
+ src/researcher.ts            |   18 [32m+[m[31m-[m
+ src/scoring/authority.ts     |   18 [32m+[m[31m-[m
+ src/skills/loader.ts         |   55 [32m+[m
+ src/swarm/health.ts          |  135 [32m+++[m
+ src/swarm/logger.ts          |   31 [32m+[m[31m-[m
+ src/swarm/orchestrator.ts    |  387 [32m++++[m[31m---[m
+ src/swarm/visited-cache.ts   |   35 [32m+[m[31m-[m
+ src/swarm/worker.ts          |  632 [32m++++[m[31m------[m
+ src/synthesis/ai.ts          |  343 [32m+++[m[31m---[m
+ src/toolsProvider.ts         |  647 [32m+++++[m[31m------[m
+ src/types.ts                 |  134 [32m+++[m
+ src/utils/llm.ts             |   85 [32m++[m
+ src/utils/tokens.ts          |  104 [32m++[m
+ 37 files changed, 5085 insertions(+), 3654 deletions(-)
