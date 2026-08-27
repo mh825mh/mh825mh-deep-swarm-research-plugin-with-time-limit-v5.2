@@ -1,5 +1,481 @@
+
+// ==================== FILE: src\config.ts ====================
+
+// src/config.ts
+import { createConfigSchematics } from "@lmstudio/sdk";
+
+export const configSchematics = createConfigSchematics()
+  .field(
+    "timeRange",
+    "select",
+    {
+      displayName: "Search Time Range",
+      subtitle: "Filter search results by publication date to ensure information freshness.",
+      options: [
+        { value: "all", displayName: "All time (default)" },
+        { value: "year", displayName: "Past year" },
+        { value: "month", displayName: "Past month" },
+        { value: "week", displayName: "Past week" },
+        { value: "day", displayName: "Past 24 hours" },
+      ],
+    },
+    "all",
+  )
+  .field(
+    "researchDepth",
+    "select",
+    {
+      displayName: "Research Depth",
+      subtitle:
+        "Controls rounds, per-worker budgets, queries, and link-following aggressiveness. " +
+        "Sources are collected adaptively with no hard cap — deeper = more sources.",
+      options: [
+        { value: "shallow", displayName: "Shallow — 1 round, ~10-25 sources, fast" },
+        { value: "standard", displayName: "Standard — 3 rounds, ~30-60 sources (recommended)" },
+        { value: "deep", displayName: "Deep — 5 rounds, ~60-120 sources, thorough" },
+        { value: "deeper", displayName: "Deeper — 10 rounds, ~100-200+ sources, very thorough" },
+        { value: "exhaustive", displayName: "Exhaustive — 15 rounds, 200+ sources, maximum depth" },
+      ],
+    },
+    "standard",
+  )
+  .field(
+    "engineSelectionMode",
+    "select",
+    {
+      displayName: "Engine Selection Mode",
+      subtitle:
+        "Controls how search engines are chosen per worker. " +
+        "Adaptive: DDG first, fallbacks if weak. " +
+        "Benchmark: Run all engines to test performance. " +
+        "Priority: Use best engines from historical data.",
+      options: [
+        { value: "adaptive", displayName: "Adaptive (Default)" },
+        { value: "benchmark", displayName: "Benchmark (Run all)" },
+        { value: "priority", displayName: "Priority (Historical)" },
+      ],
+    },
+    "adaptive",
+  )
+  .field(
+    "cacheDuration",
+    "select",
+    {
+      displayName: "Persistent Cache Duration",
+      subtitle: "How long visited pages and extracted content are kept in the local cache.",
+      options: [
+        { value: "30", displayName: "30 Days" },
+        { value: "90", displayName: "90 Days" },
+        { value: "180", displayName: "6 Months" },
+        { value: "365", displayName: "12 Months" },
+        { value: "730", displayName: "24 Months" },
+      ],
+    },
+    "30",
+  )
+  .field(
+    "contentLimitPerPage",
+    "numeric",
+    {
+      displayName: "Content Per Page (chars)",
+      subtitle:
+        "Characters extracted per page. Higher = richer but slower. " +
+        "Leave at default to auto-scale with depth preset (1000-20000)",
+      min: 1000,
+      max: 20000,
+      int: true,
+      slider: { step: 1000, min: 1000, max: 20000 },
+    },
+    4000,
+  )
+  .field(
+    "enableLinkFollowing",
+    "select",
+    {
+      displayName: "Link Following",
+      subtitle: "Workers follow relevant in-page links (like citations and references)",
+      options: [
+        { value: "on", displayName: "On — follow top links (recommended)" },
+        { value: "off", displayName: "Off — search results only" },
+      ],
+    },
+    "on",
+  )
+  .field(
+    "enableAIPlanning",
+    "select",
+    {
+      displayName: "AI Query Planning",
+      subtitle: "Use the loaded model for smarter queries, dynamic decomposition, and synthesis",
+      options: [
+        { value: "on", displayName: "On — AI-powered (best quality)" },
+        { value: "off", displayName: "Off — dimension-based fallback (faster start)" },
+      ],
+    },
+    "on",
+  )
+  .field(
+    "safeSearch",
+    "select",
+    {
+      displayName: "Safe Search",
+      options: [
+        { value: "strict", displayName: "Strict" },
+        { value: "moderate", displayName: "Moderate" },
+        { value: "off", displayName: "Off" },
+      ],
+    },
+    "moderate",
+  )
+  .field(
+    "enableLocalSources",
+    "select",
+    {
+      displayName: "Data Sources",
+      subtitle: "Choose where the research swarm should pull information from.",
+      options: [
+        { value: "off", displayName: "Web only" },
+        { value: "local", displayName: "Local documents only" },
+        { value: "web_local", displayName: "Local documents and web" },
+      ],
+    },
+    "off",
+  )
+  .field(
+    "maxSessionMinutes",
+    "numeric",
+    {
+      displayName: "Max Session Time (minutes)",
+      subtitle:
+        "Hard cap on wall-clock time for Deep Research runs. " +
+        "Set to 0 for Unlimited (runs until exhausted or stagnates).",
+      min: 0,
+      max: 240,
+      int: true,
+      slider: { step: 5, min: 0, max: 240 },
+    },
+    30,
+  )
+  .field(
+    "enableAcademicAPIs",
+    "select",
+    {
+      displayName: "Academic APIs (OpenAlex, Crossref, arXiv)",
+      subtitle: "Query academic databases directly for papers and research.",
+      options: [
+        { value: "on", displayName: "On" },
+        { value: "off", displayName: "Off" },
+      ],
+    },
+    "off",
+  )
+  .field(
+    "enableYouTube",
+    "select",
+    {
+      displayName: "YouTube Transcript Search",
+      subtitle: "Search YouTube and extract video transcripts as text sources.",
+      options: [
+        { value: "on", displayName: "On" },
+        { value: "off", displayName: "Off" },
+      ],
+    },
+    "off",
+  )
+  .field(
+    "enableReferenceSearch",
+    "select",
+    {
+      displayName: "Encyclopedia Search",
+      subtitle: "Prioritize Grokipedia, Encyclopedia.com, and Britannica over Wikipedia.",
+      options: [
+        { value: "on", displayName: "On" },
+        { value: "off", displayName: "Off" },
+      ],
+    },
+    "on",
+  )
+    .field(
+    "contextBudgetMode",
+    "select",
+    {
+      displayName: "Context Budget Mode",
+      subtitle: "Controls how the plugin manages token limits for synthesis. Auto is recommended.",
+      options: [
+        { value: "auto", displayName: "Auto (Recommended)" },
+        { value: "conservative", displayName: "Conservative" },
+        { value: "manual", displayName: "Manual Override" },
+      ],
+    },
+    "auto",
+  )
+  .field(
+    "manualContextLimit",
+    "numeric",
+    {
+      displayName: "Manual Context Limit (Tokens)",
+      subtitle: "Only used if Mode is Manual. E.g., 8192, 16384, 32768.",
+      min: 2048,
+      max: 131072,
+      int: true,
+    },
+    8192,
+  )
+  .field(
+    "maxSynthesisInputTokens",
+    "numeric",
+    {
+      displayName: "Max Synthesis Input Tokens",
+      subtitle: "Hard cap on tokens sent to the model for final report generation.",
+      min: 2000,
+      max: 32000,
+      int: true,
+    },
+    18000,
+  )
+    .field(
+    "contextIsolation",
+    "select",
+    {
+      displayName: "LLM Context Isolation",
+      subtitle: "Controls how model context is managed. Strict isolation prevents context overflow and history bleed.",
+      options: [
+        { value: "strict", displayName: "Strict isolation (Recommended)" },
+        { value: "worker_reuse", displayName: "Reuse within one worker only" },
+        { value: "advanced_reuse", displayName: "Advanced reuse (Not recommended)" },
+      ],
+    },
+    "strict",
+  )
+  .field(
+    "llmCallMode",
+    "select",
+    {
+      displayName: "LLM Call Budget",
+      subtitle: "Hard limit on model calls to prevent infinite loops. Standard is highly recommended.",
+      options: [
+        { value: "compact", displayName: "Compact (Max 20 calls)" },
+        { value: "standard", displayName: "Standard (Max 45 calls)" },
+        { value: "deep", displayName: "Deep (Max 80 calls)" },
+        { value: "extended", displayName: "Extended (Max 120 calls)" },
+      ],
+    },
+    "standard",
+  )
+  // Add this right BEFORE the final .build()
+  .field(
+    "flaresolverrUrl",
+    "string",
+    {
+      displayName: "FlareSolverr URL (Advanced)",
+      subtitle: "Optional: Local endpoint to bypass strict Cloudflare blocks (e.g., http://127.0.0.1:8191/v1). Leave blank to disable.",
+    },
+    ""
+  )  
+  .build();
+
+// ==================== FILE: src\net\ddg.ts ====================
+
+import { fetchPage } from "./http";
+
+export class DdgRateLimiter {
+  private lastRequest = 0;
+  private minDelay: number;
+
+  constructor(minDelayMs: number = 2500) {
+    this.minDelay = minDelayMs;
+  }
+
+  async acquire(): Promise<void> {
+    const now = Date.now();
+    const elapsed = now - this.lastRequest;
+    if (elapsed < this.minDelay) {
+      await new Promise((resolve) => setTimeout(resolve, this.minDelay - elapsed));
+    }
+    this.lastRequest = Date.now();
+  }
+}
+
+export const sharedDdgLimiter = new DdgRateLimiter(2500);
+
+export class DdgLimiterPool {
+  private limiters: DdgRateLimiter[] = [];
+  private currentIndex = 0;
+
+  constructor(numLanes: number, minDelayMs: number = 2500) {
+    for (let i = 0; i < numLanes; i++) {
+      this.limiters.push(new DdgRateLimiter(minDelayMs));
+    }
+  }
+
+  next(): DdgRateLimiter {
+    const limiter = this.limiters[this.currentIndex];
+    this.currentIndex = (this.currentIndex + 1) % this.limiters.length;
+    return limiter;
+  }
+}
+
+export function resetThrottle(): void {}
+
+/**
+ * Bulletproof multi-tier DDG Search Waterfall:
+ * Tier A: DDG Lite POST endpoint (fastest, mimics ddgr)
+ * Tier B: DDG HTML fallback endpoint (handles strict blocks)
+ * Tier C: Graceful recovery (returns empty array instead of throwing crash errors)
+ */
+export async function searchDDG(
+  query: string,
+  maxResults: number,
+  safeSearch: "strict" | "moderate" | "off" = "moderate",
+  signal?: AbortSignal,
+  limiter?: DdgRateLimiter,
+  timeRange: string = "all"
+): Promise<ReadonlyArray<{ url: string; title: string; snippet: string }>> {
+  if (limiter) await limiter.acquire();
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
+  const safeParam = safeSearch === "strict" ? "1" : safeSearch === "off" ? "-1" : "0";
+  const dfParam = timeRange === "all" ? "" : `&df=${timeRange}`;
+  const formData = `q=${encodeURIComponent(query)}&kp=${safeParam}${dfParam}`;
+
+  // TIER A: DDG Lite Endpoint
+  try {
+    const res = await fetchPage("https://lite.duckduckgo.com/lite/", signal!, {
+      method: "POST",
+      body: formData,
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Referer": "https://lite.duckduckgo.com/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+      }
+    });
+    const hits = parseDDGResults(res.html, maxResults);
+    if (hits.length > 0) return hits;
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    console.warn(`[DDG Tier A] Failed for query "${query}": ${err instanceof Error ? err.message : String(err)}. Trying Tier B...`);
+  }
+
+  // TIER B: DDG HTML Endpoint Fallback
+  try {
+    if (limiter) await limiter.acquire();
+    const htmlFallbackUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    const resB = await fetchPage(htmlFallbackUrl, signal!, {
+      method: "GET",
+      headers: {
+        "Referer": "https://html.duckduckgo.com/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+      }
+    });
+    const hitsB = parseHTMLDDGResults(resB.html, maxResults);
+    if (hitsB.length > 0) return hitsB;
+  } catch (errB) {
+    if (signal?.aborted) throw errB;
+    console.warn(`[DDG Tier B] Fallback also failed for query "${query}": ${errB instanceof Error ? errB.message : String(errB)}`);
+  }
+
+  // TIER C: Graceful exit (Returns empty array so the worker's outer health system handles it cleanly without crashing)
+  return [];
+}
+
+export async function searchDDGPaginated(
+  query: string,
+  maxResultsPerPage: number,
+  pages: number,
+  safeSearch: "strict" | "moderate" | "off" = "moderate",
+  signal?: AbortSignal,
+  limiter?: DdgRateLimiter,
+  timeRange: string = "all"
+): Promise<ReadonlyArray<{ url: string; title: string; snippet: string }>> {
+  const allHits: { url: string; title: string; snippet: string }[] = [];
+
+  for (let p = 1; p <= pages; p++) {
+    if (signal?.aborted) break;
+    
+    const safeParam = safeSearch === "strict" ? "1" : safeSearch === "off" ? "-1" : "0";
+    const dfParam = timeRange === "all" ? "" : `&df=${timeRange}`;
+    const formData = `q=${encodeURIComponent(query)}&kp=${safeParam}${dfParam}&s=${(p - 1) * maxResultsPerPage}`;
+    
+    try {
+      if (limiter) await limiter.acquire();
+      const res = await fetchPage("https://lite.duckduckgo.com/lite/", signal!, {
+        method: "POST",
+        body: formData,
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Referer": "https://lite.duckduckgo.com/"
+        }
+      });
+      const hits = parseDDGResults(res.html, maxResultsPerPage);
+      allHits.push(...hits);
+      if (hits.length < maxResultsPerPage) break;
+    } catch {
+      break;
+    }
+  }
+  return allHits;
+}
+
+function parseDDGResults(html: string, maxResults: number): { url: string; title: string; snippet: string }[] {
+  const hits: { url: string; title: string; snippet: string }[] = [];
+  const seen = new Set<string>();
+  
+  // Resilient regex pattern matching DDG Lite result rows
+  const resultRe = /<a[^>]*rel="nofollow"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<td class="result-snippet">([\s\S]*?)<\/td>/gi;
+  let match: RegExpExecArray | null;
+  
+  while (hits.length < maxResults && (match = resultRe.exec(html)) !== null) {
+    let url = match[1];
+    const title = match[2].replace(/<[^>]+>/g, "").trim();
+    const snippet = match[3].replace(/<[^>]+>/g, "").trim();
+    
+    // Clean up redirect wrappers if present
+    if (url.includes("uddg=")) {
+      const matchUrl = url.match(/uddg=([^&]+)/);
+      if (matchUrl) url = decodeURIComponent(matchUrl[1]);
+    }
+
+    if (url.includes("duckduckgo.com")) continue;
+    if (!url.startsWith("http")) continue;
+    
+    if (seen.has(url)) continue;
+    seen.add(url);
+    
+    hits.push({ url, title, snippet });  
+  }
+  
+  return hits;
+}
+
+function parseHTMLDDGResults(html: string, maxResults: number): { url: string; title: string; snippet: string }[] {
+  const hits: { url: string; title: string; snippet: string }[] = [];
+  const seen = new Set<string>();
+  
+  // Secondary parser for standard DDG HTML results page layout
+  const resultRe = /<a class="result__url" href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
+  let match: RegExpExecArray | null;
+  
+  while (hits.length < maxResults && (match = resultRe.exec(html)) !== null) {
+    let url = match[1];
+    const title = match[2].replace(/<[^>]+>/g, "").trim();
+    const snippet = match[3].replace(/<[^>]+>/g, "").trim();
+
+    if (url.includes("duckduckgo.com")) continue;
+    if (!url.startsWith("http") && url.startsWith("//")) url = "https:" + url;
+    if (!url.startsWith("http")) continue;
+    
+    if (seen.has(url)) continue;
+    seen.add(url);
+    
+    hits.push({ url, title, snippet });  
+  }
+  
+  return hits;
+}
+
+// ==================== FILE: src\swarm\orchestrator.ts ====================
+
 import { runWorker, CrawlMetrics } from "./worker";
-import { LMStudioClient } from "@lmstudio/sdk";
 import {
   buildQueryPlan,
   buildAdaptiveGapFill,
@@ -451,45 +927,25 @@ export async function runSwarm(
   const pool = new DdgLimiterPool(profile.searchLanes, profile.ddgRateLimitMs);
 
   // ==========================================
-  // LAYER 1: THE AI RAG GATEKEEPER
+  // LAYER 1: MANDATORY LOCAL SOURCE PASS
   // ==========================================
-  let shouldSearchLocal = cfg.enableLocalSources;
-  
-  if (shouldSearchLocal && plan.usedAI) {
-    fileStatus(`\n🤖 PRE-FLIGHT: Validating if topic requires local RAG...`);
-    try {
-      const client = new LMStudioClient();
-      const models = await client.llm.listLoaded();
-      if (models && models.length > 0) {
-        const model = await client.llm.model(models[0].identifier);
-        const gatePrompt = `Topic: "${cfg.topic}". Does this query explicitly ask for personal, internal, or company documents? Answer ONLY YES or NO.`;
-        const stream = model.respond([{ role: "user", content: gatePrompt }], { maxTokens: 10, temperature: 0.1 });
-        let result = "";
-        for await (const chunk of stream) result += chunk.content ?? "";
-        
-        if (result.trim().toUpperCase().includes("NO")) {
-          fileWarn(`[RAG GATE] Topic does not require local files. Bypassing Layer 1 to save context budget.`);
-          shouldSearchLocal = false;
-        }
-      }
-    } catch (e) {
-      fileWarn(`[RAG GATE] LLM check failed, defaulting to web-only.`);
-      shouldSearchLocal = false;
-    }
-  }
-
-  if (shouldSearchLocal) {
-    fileStatus(`\n📚 LAYER 1: Searching Local RAG Libraries...`);
+  if (cfg.enableLocalSources) {
+    fileStatus(`\n📚 LAYER 1: Searching Local RAG Libraries first...`);
     const localTasks = buildRound1Tasks(roles, plan.queriesByRole, profile, cfg);
     const localOnlyTasks = localTasks.map(t => ({ ...t, extraEngines: [] as ReadonlyArray<string> }));
     const localResults = await runTaskGroup(localOnlyTasks, state, pool, signal, fileStatus, fileWarn, plan.topicKeywords, health, llmManager);
     aggregateResults(localResults, allSources, allQueries, allErrors);
     
-    health.localChunksRetrieved = allSources.length;
-    health.localChunksAccepted = allSources.length;
-    fileStatus(`✅ Layer 1 Complete. Found ${allSources.length} local sources.`);
+    const localCount = allSources.length;
+    health.localChunksRetrieved = localCount;
+    health.localChunksAccepted = localCount;
+    fileStatus(`✅ Layer 1 Complete. Found ${localCount} local sources.`);
+
+    if (localCount >= profile.pageBudgetPerWorker * roles.length) {
+      fileStatus(`Local evidence SUFFICIENT. Skipping external web search.`);
+    }
   } else {
-    fileStatus(`\n⚠️ Local sources disabled or bypassed. Proceeding to web search.`);
+    fileStatus(`\n⚠️ Local sources disabled. Proceeding to web search.`);
   }
 
   // ==========================================
@@ -519,16 +975,7 @@ export async function runSwarm(
     label: `Gap: ${g.label}`,
     queries: g.queries(cfg.topic),
     followLinks: true
-  })) as ReadonlyArray<GapPlanLike>, 1, profile, cfg).map(task => {
-    // ENCYCLOPEDIA FORCING: Append site operators for academic/breadth roles
-    if (cfg.enableReferenceSearch && (task.role === "academic" || task.role === "breadth")) {
-      return {
-        ...task,
-        queries: task.queries.map(q => `${q} (site:wikipedia.org OR site:britannica.com OR site:encyclopedia.com)`)
-      };
-    }
-    return task;
-  });
+  })) as ReadonlyArray<GapPlanLike>, 1, profile, cfg);
 
   const maxSessionTimeMs = cfg.maxSessionMs || 30 * 60 * 1000;
   const startTime = Date.now();
@@ -665,4 +1112,201 @@ function aggregateResults(
 function percent(part: number, total: number): number {
   if (total <= 0) return 0;
   return Math.round((part / total) * 100);
+}
+
+// ==================== FILE: src\synthesis\ai.ts ====================
+
+// src/synthesis/ai.ts
+import { LMStudioClient } from "@lmstudio/sdk";
+import { ReportSource, ContradictionEntry, StatusFn, EvidenceCard, ContextBudget } from "../types";
+import { logLlmDiagnostics, estimateTokens, preflightSynthesis } from "../utils/tokens";
+import {
+  DepthProfile,
+  AI_SYNTHESIS_TEMPERATURE,
+  AI_SYNTHESIS_TIMEOUT_MS,
+  CONTRADICTION_SOURCE_CHARS,
+  SYSTEM_INSTRUCTIONS,
+} from "../constants";
+
+function prepareEvidenceLedger(
+  evidence: ReadonlyArray<EvidenceCard>,
+  maxTokens: number
+): string {
+  const sorted = [...evidence].sort((a, b) => {
+    const score = { High: 3, Medium: 2, Low: 1 };
+    return score[b.confidence] - score[a.confidence];
+  });
+
+  const ledger: string[] = [];
+  let currentTokens = 0;
+  const tokenLimit = maxTokens - 1000;
+
+  for (const card of sorted) {
+    const entry = `[${card.id}] (${card.entityType}) ${card.title} - ${card.authorOrHost}
+URL: ${card.canonicalUrl}
+Tier: ${card.sourceTier} | Confidence: ${card.confidence} | Freshness: ${card.freshness ?? "Unknown"}
+Claim: ${card.relevantClaim}
+Excerpt: "${card.supportingExcerpt}"`;
+    
+    const entryTokens = estimateTokens(entry);
+    if (currentTokens + entryTokens > tokenLimit) break;
+
+    ledger.push(entry);
+    currentTokens += entryTokens;
+  }
+
+  return ledger.join("\n\n---\n\n");
+}
+
+export async function synthesiseReport(
+  topic: string,
+  evidence: ReadonlyArray<EvidenceCard>,
+  coveredClaims: ReadonlyArray<string>,
+  gapClaims: ReadonlyArray<string>,
+  status: StatusFn,
+  budget: ContextBudget,
+): Promise<string | null> {
+  if (evidence.length === 0) return null;
+
+  status(`AI synthesis - preparing evidence ledger (${evidence.length} cards, budget: ${budget.maxSynthesisInput} tokens)…`);
+
+      const evidenceBlock = prepareEvidenceLedger(evidence, budget.maxSynthesisInput);
+  const prompt = `You are an expert research analyst. Write a comprehensive, well-structured narrative synthesis of these research findings.
+
+TOPIC: "${topic}"
+CLAIMS COVERED: ${coveredClaims.join(", ")}
+
+EVIDENCE LEDGER (Tier A & B only):
+ ${evidenceBlock}
+
+STRICT OUTPUT RULES:
+1. You MUST start with a Markdown table of recommended sources with these exact columns:
+   | Recommendation | Why it fits | Official verification | Independent validation | Status |
+2. Only include sources with Verification Tier A or Tier B in the main recommendations.
+3. Place Tier C sources in a separate "Other Candidates" appendix at the bottom.
+4. Do NOT make generic claims like "All sources are authoritative" or "97% confidence".
+5. Only make claims explicitly supported by the Evidence Ledger records.
+6. If entity metadata (ISBN, host, edition) is missing, state "Metadata incomplete" rather than guessing.
+7. For books, prefer current editions. Label older foundational titles as "foundational".
+8. For podcasts, require a current official page or episode within the last 12 months. Label inactive podcasts as "inactive".
+
+
+SYNTHESIS:`;
+
+  const promptTokens = estimateTokens(prompt);
+  const preflight = preflightSynthesis(promptTokens, budget);
+
+  status(`[TOKEN PREFLIGHT] Projected: ${preflight.projectedTotal}/${budget.modelContextLimit} | Decision: ${preflight.decision}`);
+
+  if (preflight.decision === "FAIL-SAFE") {
+    status("SYNTHESIS_SKIPPED_CONTEXT_RISK");
+    return null;
+  }
+
+  logLlmDiagnostics("synthesiseReport", prompt);
+
+  try {
+    const client = new LMStudioClient();
+    const models = await Promise.race<Awaited<ReturnType<typeof client.llm.listLoaded>>>([
+      client.llm.listLoaded(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), AI_SYNTHESIS_TIMEOUT_MS)),
+    ]);
+
+    if (!Array.isArray(models) || models.length === 0) return null;
+    const model = await client.llm.model(models[0].identifier);
+
+    const stream = model.respond(
+      [
+        { role: "system", content: SYSTEM_INSTRUCTIONS },
+        { role: "user", content: prompt },
+      ],
+      {
+        maxTokens: budget.outputReserve,
+        temperature: AI_SYNTHESIS_TEMPERATURE,
+      }
+    );
+
+    let result = "";
+    for await (const chunk of stream) result += chunk.content ?? "";
+
+    if (result.length > 100) {
+      status(`AI synthesis complete (${result.length} chars)`);
+      return result;
+    }
+    return null;
+  } catch (err) {
+    status(`AI synthesis failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+export async function detectContradictions(
+  topic: string,
+  sources: ReadonlyArray<ReportSource>,
+  status: StatusFn,
+  profile: DepthProfile,
+): Promise<ReadonlyArray<ContradictionEntry>> {
+  if (sources.length < 3) return [];
+
+  status("Checking for cross-source contradictions...");
+
+  const sourceBlock = sources.slice(0, profile.contradictionMaxSources).map((s) => {
+    const preview = s.text.slice(0, CONTRADICTION_SOURCE_CHARS).replace(/\n+/g, " ").trim();
+    return `[${s.index}] "${s.title}" - ${s.tier}\n${preview}`;
+  }).join("\n\n");
+
+  const maxContradictions = Math.min(10, Math.max(5, Math.floor(sources.length / 5)));
+
+  const prompt = `You are a fact-checking analyst. Given these research sources on "${topic}", identify any CONTRADICTIONS.
+SOURCES:
+ ${sourceBlock}
+
+For each contradiction, output ONE line:
+CLAIM: <claim> | SOURCE_A: [<index>] <stance> | SOURCE_B: [<index>] <stance> | SEVERITY: <minor/moderate/major>
+
+If none, output: NONE
+Max ${maxContradictions} contradictions.
+OUTPUT:`;
+
+  try {
+    const client = new LMStudioClient();
+    const models = await client.llm.listLoaded();
+    if (!models || models.length === 0) return [];
+    const model = await client.llm.model(models[0].identifier);
+    
+    const stream = model.respond(
+      [{ role: "user", content: prompt }],
+      { maxTokens: 1500, temperature: 0.15 }
+    );
+
+    let raw = "";
+    for await (const chunk of stream) raw += chunk.content ?? "";
+
+    if (!raw || /^NONE$/im.test(raw.trim())) return [];
+
+    const entries: ContradictionEntry[] = [];
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("CLAIM:")) continue;
+      try {
+        const claimMatch = /CLAIM:\s*(.+?)\s*\|/.exec(trimmed);
+        const sourceAMatch = /SOURCE_A:\s*\[(\d+)\]\s*(.+?)\s*\|/.exec(trimmed);
+        const sourceBMatch = /SOURCE_B:\s*\[(\d+)\]\s*(.+?)\s*\|/.exec(trimmed);
+        const sevMatch = /SEVERITY:\s*(minor|moderate|major)/i.exec(trimmed);
+        if (!claimMatch || !sourceAMatch || !sourceBMatch) continue;
+
+        const idxA = parseInt(sourceAMatch[1], 10);
+        const idxB = parseInt(sourceBMatch[1], 10);
+        entries.push({
+          claim: claimMatch[1].trim(),
+          sourceA: { index: idxA, title: sources.find(s => s.index === idxA)?.title ?? `Source ${idxA}`, stance: sourceAMatch[2].trim() },
+          sourceB: { index: idxB, title: sources.find(s => s.index === idxB)?.title ?? `Source ${idxB}`, stance: sourceBMatch[2].trim() },
+          severity: (sevMatch?.[1]?.toLowerCase() ?? "minor") as "minor" | "moderate" | "major",
+        });
+      } catch { continue; }
+    }
+    return entries;
+  } catch {
+    return [];
+  }
 }

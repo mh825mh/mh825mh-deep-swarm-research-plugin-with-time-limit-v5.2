@@ -24,11 +24,7 @@ function prepareEvidenceLedger(
   const tokenLimit = maxTokens - 1000;
 
   for (const card of sorted) {
-    const entry = `[${card.id}] (${card.entityType}) ${card.title} - ${card.authorOrHost}
-URL: ${card.canonicalUrl}
-Tier: ${card.sourceTier} | Confidence: ${card.confidence} | Freshness: ${card.freshness ?? "Unknown"}
-Claim: ${card.relevantClaim}
-Excerpt: "${card.supportingExcerpt}"`;
+    const entry = `[${card.id}] (${card.entityType}) ${card.title} - ${card.authorOrHost}\nURL: ${card.canonicalUrl}\nTier: ${card.sourceTier} | Confidence: ${card.confidence} | Freshness: ${card.freshness ?? "Unknown"}\nClaim: ${card.relevantClaim}\nExcerpt: "${card.supportingExcerpt}"`;
     
     const entryTokens = estimateTokens(entry);
     if (currentTokens + entryTokens > tokenLimit) break;
@@ -52,7 +48,8 @@ export async function synthesiseReport(
 
   status(`AI synthesis - preparing evidence ledger (${evidence.length} cards, budget: ${budget.maxSynthesisInput} tokens)…`);
 
-      const evidenceBlock = prepareEvidenceLedger(evidence, budget.maxSynthesisInput);
+  const evidenceBlock = prepareEvidenceLedger(evidence, budget.maxSynthesisInput);
+  
   const prompt = `You are an expert research analyst. Write a comprehensive, well-structured narrative synthesis of these research findings.
 
 TOPIC: "${topic}"
@@ -62,16 +59,12 @@ EVIDENCE LEDGER (Tier A & B only):
  ${evidenceBlock}
 
 STRICT OUTPUT RULES:
-1. You MUST start with a Markdown table of recommended sources with these exact columns:
-   | Recommendation | Why it fits | Official verification | Independent validation | Status |
-2. Only include sources with Verification Tier A or Tier B in the main recommendations.
-3. Place Tier C sources in a separate "Other Candidates" appendix at the bottom.
-4. Do NOT make generic claims like "All sources are authoritative" or "97% confidence".
-5. Only make claims explicitly supported by the Evidence Ledger records.
-6. If entity metadata (ISBN, host, edition) is missing, state "Metadata incomplete" rather than guessing.
-7. For books, prefer current editions. Label older foundational titles as "foundational".
-8. For podcasts, require a current official page or episode within the last 12 months. Label inactive podcasts as "inactive".
-
+1. SUMMARY: Start with a Markdown table of recommended sources using these exact columns: | Recommendation | Why it fits | Official verification | Status |
+2. CITATION ANCHORING: You MUST cite every factual claim inline using the Exact Index Format: [1], [2], etc.
+3. NO ORPHAN METRICS: Do not include ANY percentages, statistics, or metrics unless they are explicitly written verbatim in the provided Evidence Ledger. If you cannot point to the exact excerpt, DROP the statistic.
+4. TAXONOMY SEPARATION: Keep documented field investigations, anecdotal accounts, and philosophical doctrine in separate sections. Do not conflate them.
+5. NO HALLUCINATED NAMES: You may only cite authors, researchers, and institutions explicitly listed in the Evidence Ledger.
+6. REFERENCE APPENDIX: Conclude the report with a strict Markdown table titled "Reference Appendix" mapping each [Index] to its Canonical URL and Author/Host.
 
 SYNTHESIS:`;
 

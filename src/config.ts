@@ -129,9 +129,9 @@ export const configSchematics = createConfigSchematics()
     "select",
     {
       displayName: "Data Sources",
-      subtitle: "Choose where the research swarm should pull information from.",
+      subtitle: "WARNING: Local RAG can consume your entire budget. Only enable if your prompt specifically asks about your internal documents.",
       options: [
-        { value: "off", displayName: "Web only" },
+        { value: "off", displayName: "Web only (Recommended)" },
         { value: "local", displayName: "Local documents only" },
         { value: "web_local", displayName: "Local documents and web" },
       ],
