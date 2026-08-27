@@ -210,15 +210,19 @@ export async function runWorker(
     if (task.extraEngines.includes("ddg") && health.isDdgAvailable()) {
       metrics.ddgQueries++;
       try {
+        // Random human-like pause before querying DDG (2-8 seconds)
+        const humanDelay = Math.floor(Math.random() * 6000) + 2000;
+        await sleep(humanDelay);
+
         if (task.searchPages > 1) {
           ddgHits = await searchDDGPaginated(query, task.searchResultsPerQuery, task.searchPages, task.safeSearch, signal, limiter, task.timeRange ?? "all");
         } else {
           ddgHits = await searchDDG(query, task.searchResultsPerQuery, task.safeSearch, signal, limiter, task.timeRange ?? "all");
         }
 
-        // 5. LOWERED DDG TRIPWIRE: Accept even 1 result to support tight encyclopedia operators
-        if (ddgHits.length < 1) {
-          throw new Error("INVALID_RESULT_SET (< 1 result)");
+        // LOWERED TRIPWIRE: If it finds even 1 result, that is a success.
+        if (ddgHits.length === 0) {
+          throw new Error("INVALID_RESULT_SET (0 results)");
         }
 
         health.recordDdgSuccess(ddgHits.length);
@@ -245,10 +249,18 @@ export async function runWorker(
         const msg = errorMessage(err);
         health.recordDdgFailure(msg);
         warn(`${roleTag} DDG failed (${health.ddg.consecutiveFailures}/5): ${msg}`);
+        
+        // Massive exponential backoff penalty if a block is detected (10-15 seconds)
+        if (msg.includes("403") || msg.includes("Blocked")) {
+           const penalty = Math.floor(Math.random() * 5000) + 10000;
+           warn(`${roleTag} Applying ${penalty/1000}s penalty pause to clear WAF...`);
+           await sleep(penalty);
+           ddgBlocked = true; 
+        }
       }
     }
 
-    // Query Mutation (LLM)
+   // Query Mutation (LLM)
     const isHighlyRestrictive = query.includes("site:");
     
     if (
