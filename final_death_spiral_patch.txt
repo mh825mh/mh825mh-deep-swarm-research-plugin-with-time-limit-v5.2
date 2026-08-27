@@ -1,3 +1,172 @@
+
+// ==================== FILE: src\constants.ts ====================
+
+export type DepthPreset = "shallow" | "standard" | "deep" | "deeper" | "exhaustive";
+
+export interface DepthProfile {
+  readonly depthRounds: number;
+  readonly pageBudgetPerWorker: number;
+  readonly pageBudgetPerGapWorker: number;
+  readonly defaultContentLimit: number;
+  readonly searchResultsPerQuery: number;
+  readonly maxQueriesPerWorker: number;
+  readonly maxPagesPerDomain: number;
+  readonly maxLinksToEvaluate: number;
+  readonly maxLinksToFollow: number;
+  readonly maxOutlinksPerPage: number;
+  readonly candidatePoolMultiplier: number;
+  readonly workerConcurrency: number;
+  readonly maxDecompositionWorkers: number;
+  readonly maxGapFillQueries: number;
+  readonly ddgRateLimitMs: number;
+  readonly minRelevanceScore: number;
+  readonly synthesisMaxSources: number;
+  readonly synthesisSourceChars: number;
+  readonly synthesisMaxTokens: number;
+  readonly contradictionMaxSources: number;
+  readonly stagnationThreshold: number;
+  readonly searchPages: number;
+  readonly searchLanes: number;
+  readonly workerFanOut: number;
+  readonly extraEngines: ReadonlyArray<string>;
+  readonly linkCrawlDepth: number;
+  readonly queryMutationThreshold: number;
+}
+
+export const DEPTH_PROFILES: Readonly<Record<DepthPreset, DepthProfile>> = {
+  shallow: {
+    depthRounds: 1, pageBudgetPerWorker: 5, pageBudgetPerGapWorker: 4, defaultContentLimit: 5_000,
+    searchResultsPerQuery: 8, maxQueriesPerWorker: 3, maxPagesPerDomain: 3, maxLinksToEvaluate: 20,
+    maxLinksToFollow: 2, maxOutlinksPerPage: 20, candidatePoolMultiplier: 2, workerConcurrency: 3,
+    maxDecompositionWorkers: 6, maxGapFillQueries: 4, ddgRateLimitMs: 2_200, minRelevanceScore: 0.15,
+    synthesisMaxSources: 15, synthesisSourceChars: 500, synthesisMaxTokens: 3_000, contradictionMaxSources: 10,
+    stagnationThreshold: 1, searchPages: 1, searchLanes: 2, workerFanOut: 1,
+    extraEngines: ["brave", "mojeek", "yandex"], linkCrawlDepth: 1, queryMutationThreshold: 2,
+  },
+  standard: {
+    depthRounds: 3, pageBudgetPerWorker: 8, pageBudgetPerGapWorker: 6, defaultContentLimit: 6_000,
+    searchResultsPerQuery: 10, maxQueriesPerWorker: 4, maxPagesPerDomain: 4, maxLinksToEvaluate: 30,
+    maxLinksToFollow: 4, maxOutlinksPerPage: 30, candidatePoolMultiplier: 2, workerConcurrency: 3,
+    maxDecompositionWorkers: 8, maxGapFillQueries: 5, ddgRateLimitMs: 2_000, minRelevanceScore: 0.13,
+    synthesisMaxSources: 20, synthesisSourceChars: 500, synthesisMaxTokens: 4_000, contradictionMaxSources: 15,
+    stagnationThreshold: 1, searchPages: 1, searchLanes: 2, workerFanOut: 1,
+    extraEngines: ["brave", "mojeek", "searxng", "yandex"], linkCrawlDepth: 1, queryMutationThreshold: 2,
+  },
+  deep: {
+    depthRounds: 5, pageBudgetPerWorker: 10, pageBudgetPerGapWorker: 8, defaultContentLimit: 8_000,
+    searchResultsPerQuery: 12, maxQueriesPerWorker: 5, maxPagesPerDomain: 5, maxLinksToEvaluate: 40,
+    maxLinksToFollow: 6, maxOutlinksPerPage: 40, candidatePoolMultiplier: 3, workerConcurrency: 4,
+    maxDecompositionWorkers: 10, maxGapFillQueries: 6, ddgRateLimitMs: 1_800, minRelevanceScore: 0.1,
+    synthesisMaxSources: 30, synthesisSourceChars: 400, synthesisMaxTokens: 5_000, contradictionMaxSources: 20,
+    stagnationThreshold: 2, searchPages: 2, searchLanes: 3, workerFanOut: 2,
+    extraEngines: ["brave", "mojeek", "searxng", "yandex"], linkCrawlDepth: 2, queryMutationThreshold: 3,
+  },
+  deeper: {
+    depthRounds: 8, pageBudgetPerWorker: 15, pageBudgetPerGapWorker: 12, defaultContentLimit: 10_000,
+    searchResultsPerQuery: 15, maxQueriesPerWorker: 6, maxPagesPerDomain: 6, maxLinksToEvaluate: 50,
+    maxLinksToFollow: 8, maxOutlinksPerPage: 50, candidatePoolMultiplier: 3, workerConcurrency: 4,
+    maxDecompositionWorkers: 12, maxGapFillQueries: 8, ddgRateLimitMs: 1_500, minRelevanceScore: 0.08,
+    synthesisMaxSources: 40, synthesisSourceChars: 400, synthesisMaxTokens: 6_000, contradictionMaxSources: 25,
+    stagnationThreshold: 2, searchPages: 2, searchLanes: 3, workerFanOut: 2,
+    extraEngines: ["brave", "mojeek", "scholar", "searxng", "yandex"], linkCrawlDepth: 2, queryMutationThreshold: 3,
+  },
+  exhaustive: {
+    depthRounds: 12, pageBudgetPerWorker: 20, pageBudgetPerGapWorker: 15, defaultContentLimit: 12_000,
+    searchResultsPerQuery: 18, maxQueriesPerWorker: 8, maxPagesPerDomain: 8, maxLinksToEvaluate: 60,
+    maxLinksToFollow: 10, maxOutlinksPerPage: 60, candidatePoolMultiplier: 4, workerConcurrency: 5,
+    maxDecompositionWorkers: 14, maxGapFillQueries: 10, ddgRateLimitMs: 1_200, minRelevanceScore: 0.06,
+    synthesisMaxSources: 50, synthesisSourceChars: 300, synthesisMaxTokens: 8_000, contradictionMaxSources: 30,
+    stagnationThreshold: 3, searchPages: 3, searchLanes: 4, workerFanOut: 3,
+    extraEngines: ["brave", "scholar", "searxng", "mojeek", "yandex"], linkCrawlDepth: 3, queryMutationThreshold: 4,
+  },
+};
+
+export function getDepthProfile(preset: DepthPreset): DepthProfile {
+  return DEPTH_PROFILES[preset];
+}
+
+export const DDG_RATE_LIMIT_MS = 2_000;
+export const FETCH_TIMEOUT_MS = 10_000;
+export const IMAGE_FETCH_TIMEOUT_MS = 8_000;
+export const FETCH_MAX_RETRIES = 4;
+export const FETCH_RETRY_DELAY_MS = 1500;
+export const BATCH_INTER_FETCH_DELAY_MS = 300;
+export const CACHE_FALLBACK_TIMEOUT_MS = 10_000;
+export const WORKER_CONCURRENCY = 3;
+export const MAX_PAGES_PER_DOMAIN = 3;
+export const MIN_USEFUL_WORD_COUNT = 50;
+export const MAX_LINKS_TO_EVALUATE = 40;
+export const MAX_LINKS_TO_FOLLOW = 4;
+export const MIN_RELEVANCE_SCORE = 0.15;
+export const RELEVANCE_KEYWORD_FRACTION = 0.25;
+export const RELEVANCE_TITLE_BONUS = 0.15;
+export const RELEVANCE_SNIPPET_BONUS = 0.08;
+export const FINGERPRINT_HEAD_WORDS = 30;
+export const FINGERPRINT_MID_WORDS = 20;
+export const FINGERPRINT_TAIL_WORDS = 20;
+export const SCORE_WEIGHT_DOMAIN = 0.55;
+export const SCORE_WEIGHT_URL_QUALITY = 0.25;
+export const SCORE_WEIGHT_FRESHNESS = 0.2;
+export const MIN_CANDIDATE_SCORE = 12;
+export const MIN_URL_QUALITY = 8;
+export const LINK_KEYWORD_BONUS = 20;
+export const MAX_SENTENCE_CHARS = 600;
+export const IDEAL_SENTENCE_LENGTH = 150;
+export const CONSENSUS_OVERLAP_FRACTION = 0.4;
+export const MAX_CONSENSUS_PHRASES = 10;
+export const KEY_SENTENCES_PER_SOURCE = 3;
+export const MAX_SOURCES_PER_DIMENSION = 5;
+export const REPORT_SOURCE_PREVIEW_CHARS = 700;
+export const MULTI_READ_BATCH_DELAY_MS = 500;
+export const DIMENSION_COVERAGE_MIN_HITS = 3;
+export const DIMENSION_COVERAGE_MIN_CHARS = 200;
+export const AI_SYNTHESIS_MAX_TOKENS = 3_000;
+export const AI_SYNTHESIS_TEMPERATURE = 0.35;
+export const AI_SYNTHESIS_TIMEOUT_MS = 30_000;
+export const SYNTHESIS_SOURCE_CHARS = 600;
+export const SYNTHESIS_MAX_SOURCES = 20;
+export const AI_CONTRADICTION_MAX_TOKENS = 1_500;
+export const AI_CONTRADICTION_TEMPERATURE = 0.15;
+export const AI_CONTRADICTION_TIMEOUT_MS = 15_000;
+export const CONTRADICTION_MAX_SOURCES = 15;
+export const CONTRADICTION_SOURCE_CHARS = 400;
+export const AI_PLANNING_TIMEOUT_MS = 10_000;
+export const AI_PLANNING_MAX_TOKENS = 500;
+export const AI_PLANNING_TEMPERATURE = 0.4;
+export const AI_MIN_ACCEPTABLE_QUERIES = 4;
+export const QUERY_LINE_MIN_LEN = 3;
+export const QUERY_LINE_MAX_LEN = 250;
+export const AI_DECOMPOSITION_MAX_TOKENS = 1_200;
+export const AI_DECOMPOSITION_TEMPERATURE = 0.3;
+export const AI_DECOMPOSITION_TIMEOUT_MS = 15_000;
+export const DECOMPOSITION_MIN_WORKERS = 3;
+export const DECOMPOSITION_MAX_WORKERS = 8;
+export const AI_FINDINGS_SUMMARY_MAX_TOKENS = 600;
+export const AI_FINDINGS_SUMMARY_TEMPERATURE = 0.2;
+export const FINDINGS_SUMMARY_SOURCE_CHARS = 300;
+export const DESCRIPTION_FALLBACK_CHARS = 250;
+export const MIN_READABILITY_TEXT_LEN = 100;
+export const OUTLINK_TEXT_MIN_LEN = 3;
+export const OUTLINK_TEXT_MAX_LEN = 120;
+export const DNS_RESOLVERS = ["1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9"];
+export const CONTENT_LIMIT_MIN = 1_000;
+export const CONTENT_LIMIT_MAX = 20_000;
+export const CONTENT_LIMIT_EXTENDED = 20_000;
+export const CONTENT_LIMIT_DEFAULT = 4_000;
+export const MAX_SOURCES_MIN = 5;
+export const MAX_SOURCES_MAX = 200;
+export const MAX_SOURCES_DEFAULT = 25;
+export const SEARCH_RESULTS_MIN = 1;
+export const SEARCH_RESULTS_MAX = 20;
+export const SEARCH_RESULTS_DEFAULT = 10;
+
+export const SYSTEM_INSTRUCTIONS = `You are a core component of the Deep Swarm Research engine.
+Your goal is to provide precise, high-quality research planning, task decomposition, and findings synthesis.
+Be analytical and objective. Avoid conversational filler. Follow the requested output format strictly.
+When generating search queries, ensure they are diverse, targeted, and effective for finding high-authority information.`;
+
+// ==================== FILE: src\swarm\worker.ts ====================
+
 // src/swarm/worker.ts
 import { LlmCallManager } from "../utils/llm";
 import { logLlmDiagnostics } from "../utils/tokens";
@@ -216,9 +385,9 @@ export async function runWorker(
           ddgHits = await searchDDG(query, task.searchResultsPerQuery, task.safeSearch, signal, limiter, task.timeRange ?? "all");
         }
 
-        // 5. LOWERED DDG TRIPWIRE: Accept even 1 result to support tight encyclopedia operators
-        if (ddgHits.length < 1) {
-          throw new Error("INVALID_RESULT_SET (< 1 result)");
+        // 5. Make DDG health deterministic: Require >= 3 unique non-blocked results
+        if (ddgHits.length < 3) {
+          throw new Error("INVALID_RESULT_SET (< 3 results)");
         }
 
         health.recordDdgSuccess(ddgHits.length);
@@ -249,13 +418,10 @@ export async function runWorker(
     }
 
     // Query Mutation (LLM)
-    const isHighlyRestrictive = query.includes("site:");
-    
     if (
       ddgHits.length < task.queryMutationThreshold &&
       !signal.aborted &&
       !ddgBlocked &&
-      !isHighlyRestrictive &&
       llmManager.canCall(task.id)
     ) {
       llmManager.recordCall(task.id);
@@ -298,10 +464,9 @@ export async function runWorker(
         queriesExecuted.push(bestMutation.query);
         effectiveHitCount = Math.max(effectiveHitCount, bestMutation.hits.length);
       }
-    } else if (llmManager.canCall(task.id) === false && !isHighlyRestrictive && !ddgBlocked) {
+    } else if (llmManager.canCall(task.id) === false) {
       warn(`${roleTag} LLM call budget exhausted, skipping mutation.`);
     }
-
 
     // Fallback to SearxNG or API if DDG is dead or hit 0
     const shouldUseExtraEngines = task.extraEngines.length > 0 && !signal.aborted && (ddgBlocked || effectiveHitCount < Math.ceil(task.searchResultsPerQuery * 0.6) || task.role === "academic" || task.role === "primary" || task.role === "regulatory");
