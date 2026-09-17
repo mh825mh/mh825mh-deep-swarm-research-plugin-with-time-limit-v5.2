@@ -1,8 +1,16 @@
-# 🐝 Deep Research w/ Swarm Agent (v5.3.6)
+# 🐝 Deep Research w/ Swarm Agent (v5.3.7)
 
 
 
 Autonomous deep research for LM Studio. A swarm of specialized AI workers searches your local documents and the web, dynamically adapting its strategy, verifying claims, and synthesizing everything into a structured, confidence-scored report with auditable citations—all in one tool call.
+
+## 🚀 What's New in v5.3.7?
+
+* **New Bing engine:** keyless HTML scraping with `u=` base64 target decoding. Live-tested: 10/10 result blocks decode into real URLs with snippets. Bing now replaces Google-scrape/Mojeek/Yandex as the second keyless web engine everywhere (worker extra engines, gap fillers, standalone Search tool).
+* **YouTube search fixed:** the `youtube` engine no longer scrapes the JS-rendered results page (which only yielded self-links). It now POSTs to `youtubei/v1/search` with the same WEB client the site uses, extracting real video results (title, owner, publish date, duration).
+* **Per-engine health gating:** fragile no-key engines (bing, brave, google, scholar, searxng, mojeek, yandex, youtube) now get per-engine health tracking — 3 consecutive empty results trigger an 11-minute cooldown, so dead engines stop burning 4–5s queue slots on every query. Reliable API/reference engines run unconditionally.
+* **Dead engines pruned:** removed the dead `search.ononoki.org` searxng endpoint and dropped Mojeek/Yandex/Google-scrape from default profile engine lists.
+* **Mutation upgrades:** acceptance scoring is now relevance-aware (title/snippet/URL token overlap with the original query + host diversity, so off-topic mutations can't "win"); the LLM call budget is only charged when a model is actually loaded; accepted mutations are fed back through the extra engines; and mutation hits carry full route attribution.
 
 ## 🚀 What's New in v5.3.6?
 

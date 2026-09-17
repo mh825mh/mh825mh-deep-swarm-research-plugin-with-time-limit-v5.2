@@ -47,6 +47,26 @@ export async function askLoadedModel(
   }
 }
 
+/**
+ * Cheap probe: returns true only if LM Studio has at least one model loaded.
+ * Used before consuming an expensive LLM call-budget slot so a research run
+ * without a running model doesn't burn its budget on no-op mutation calls.
+ */
+export async function hasLoadedModel(timeoutMs = 5_000): Promise<boolean> {
+  try {
+    const client = new LMStudioClient();
+    const models = await Promise.race([
+      client.llm.listLoaded(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("timeout")), timeoutMs),
+      ),
+    ]);
+    return Array.isArray(models) && models.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 const BUDGETS: Record<string, LlmCallBudget> = {
   compact: { mode: "compact", maxGlobalCalls: 20, maxCallsPerWorker: 3, maxRuntimeMs: 10 * 60 * 1000, warningThresholdMs: 8 * 60 * 1000 },
   standard: { mode: "standard", maxGlobalCalls: 45, maxCallsPerWorker: 5, maxRuntimeMs: 20 * 60 * 1000, warningThresholdMs: 15 * 60 * 1000 },

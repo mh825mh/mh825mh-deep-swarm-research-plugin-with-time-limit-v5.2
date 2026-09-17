@@ -325,7 +325,7 @@ const researchSearchTool = tool({
       const hits = await multiEngineSearch(
         query,
         max,
-        ["ddg", "searxng", "yandex", "brave"],
+        ["ddg", "bing", "reference"],
         signal,
         () => new DdgRateLimiter(10000),
         "all",

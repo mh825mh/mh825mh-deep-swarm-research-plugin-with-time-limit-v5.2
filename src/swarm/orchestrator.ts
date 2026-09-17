@@ -176,7 +176,7 @@ function getEnginesForRole(
   cfg: ResearchConfig,
   mode: "adaptive" | "benchmark" | "priority"
 ): ReadonlyArray<string> {
-  const freeEngines: string[] = ["ddg", "google", "brave"];
+  const freeEngines: string[] = ["ddg", "bing", "brave"];
   if (cfg.enableReferenceSearch) freeEngines.push("reference");
   if (cfg.enableAcademicAPIs) freeEngines.push("openalex", "crossref", "arxiv");
   if (cfg.enableYouTube) freeEngines.push("youtube");
@@ -195,9 +195,9 @@ function getEnginesForRole(
   if (role === "recency" || role === "critical") roleEngines.push("gdelt");
 
   if (roleEngines.length === 0) {
-    roleEngines.push("ddg", "google", "brave");
+    roleEngines.push("ddg", "bing", "brave");
   } else {
-    roleEngines.push("ddg", "brave");
+    roleEngines.push("ddg", "bing", "brave");
   }
 
   return roleEngines;
@@ -340,7 +340,7 @@ function buildGapTasks(
   const gapEngines: string[] = [];
   if (cfg.serperApiKey) gapEngines.push("serper");
   if (cfg.braveApiKey) gapEngines.push("brave-api");
-  if (gapEngines.length === 0) gapEngines.push("ddg", "google", "brave");
+  if (gapEngines.length === 0) gapEngines.push("ddg", "bing", "brave");
 
   for (const [subIdx, gapPlan] of gapPlans.entries()) {
     if (gapPlan.queries.length === 0) continue;

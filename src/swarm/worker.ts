@@ -1,5 +1,5 @@
 // src/swarm/worker.ts
-import { LlmCallManager, askLoadedModel } from "../utils/llm";
+import { LlmCallManager, askLoadedModel, hasLoadedModel } from "../utils/llm";
 import { logLlmDiagnostics } from "../utils/tokens";
 import { fetchWithWaterfall } from "../net/waterfallFetcher";
 import { extractYouTubeTranscript } from "../net/youtube-extractor";
@@ -268,17 +268,25 @@ export async function runWorker(
       ddgHits.length < task.queryMutationThreshold &&
       !signal.aborted &&
       !ddgBlocked &&
-      !isHighlyRestrictive &&
-      llmManager.canCall(task.id)
+      !isHighlyRestrictive
     ) {
-      llmManager.recordCall(task.id);
-      
-      const contextSnippets = allHits.filter((h) => h.query === query).slice(0, 3).map((h) => h.snippet);
-      const llmMutated = await getLLMQueryMutation(query, contextSnippets, signal);
+      let llmMutated: string | null = null;
+      if (llmManager.canCall(task.id)) {
+        // Only charge the LLM budget when a model is actually loaded, so a run
+        // without LM Studio doesn't waste budget slots on no-op mutations.
+        const modelReady = await hasLoadedModel();
+        if (modelReady) {
+          llmManager.recordCall(task.id);
+          const contextSnippets = allHits.filter((h) => h.query === query).slice(0, 3).map((h) => h.snippet);
+          llmMutated = await getLLMQueryMutation(query, contextSnippets, signal);
+        }
+      } else {
+        warn(`${roleTag} LLM call budget exhausted, skipping LLM mutation (heuristics still run).`);
+      }
       
       const mutationsToTry = [llmMutated, ...MUTATION_STRATEGIES.map((s) => s(query))].filter((m): m is string => !!m && m !== query);
       let bestMutation: { query: string; hits: ReadonlyArray<SearchHit> } | null = null;
-      const baseline = mutationQuality(ddgHits);
+      const baseline = mutationQuality(ddgHits, query);
 
       for (const mutated of mutationsToTry) {
         if (signal.aborted) break;
@@ -289,8 +297,8 @@ export async function runWorker(
           const mutHits = await searchDDG(mutated, task.searchResultsPerQuery, task.safeSearch, signal, limiter, task.timeRange ?? "all");
           metrics.ddgHits += mutHits.length;
 
-          if (mutationQuality(mutHits) > baseline) {
-            if (!bestMutation || mutationQuality(mutHits) > mutationQuality(bestMutation.hits)) {
+          if (mutationQuality(mutHits, query) > baseline) {
+            if (!bestMutation || mutationQuality(mutHits, query) > mutationQuality(bestMutation.hits, query)) {
               bestMutation = { query: mutated, hits: mutHits };
             }
           }
@@ -307,12 +315,41 @@ export async function runWorker(
       if (bestMutation) {
         metrics.mutationAccepted++;
         metrics.mutationHits += bestMutation.hits.length;
-        for (const h of bestMutation.hits) allHits.push({ ...h, query: bestMutation.query });
+        for (const h of bestMutation.hits) {
+          let domain = "";
+          try { domain = new URL(h.url).hostname.replace(/^www\./, ""); } catch {}
+          allHits.push({ ...h, query: bestMutation.query, requestedRoute: "DDG-MUTATION", actualBackend: "DDG", resultDomain: domain, discoveredBy: "ddg-mutation" });
+        }
         queriesExecuted.push(bestMutation.query);
         effectiveHitCount = Math.max(effectiveHitCount, bestMutation.hits.length);
+
+        // Feed the accepted mutation through the extra engines too, so the
+        // improved phrasing can surface results beyond DDG.
+        if (task.extraEngines.length > 0 && !signal.aborted) {
+          const trackedEngines = new Set<SearchEngine>(["bing", "brave", "google", "scholar", "searxng", "mojeek", "yandex", "youtube"]);
+          const usableEngines = (task.extraEngines as ReadonlyArray<SearchEngine>).filter(
+            (engine) => !trackedEngines.has(engine) || health.isOtherEngineAvailable(engine),
+          );
+          if (usableEngines.length > 0) {
+            try {
+              const mutExtraHits = await multiEngineSearch(
+                bestMutation.query, Math.min(task.searchResultsPerQuery, 8),
+                usableEngines,
+                signal, () => limiter, task.timeRange ?? "all",
+                { serperApiKey: (task as any).serperApiKey, braveApiKey: (task as any).braveApiKey, rssFeedUrls: (task as any).rssFeedUrls, telegramChannels: (task as any).telegramChannels }
+              );
+              metrics.extraEngineHits += mutExtraHits.length;
+              for (const h of mutExtraHits) allHits.push({ ...h, query: bestMutation.query });
+              if (mutExtraHits.length > 0) status(`${roleTag} Mutation extra engines -> ${mutExtraHits.length} results`);
+              for (const engine of usableEngines) {
+                if (!trackedEngines.has(engine)) continue;
+                const engineHits = mutExtraHits.filter((h) => h.discoveredBy === engine).length;
+                health.recordOtherEngineHit(engine, engineHits);
+              }
+            } catch {}
+          }
+        }
       }
-    } else if (llmManager.canCall(task.id) === false && !isHighlyRestrictive && !ddgBlocked) {
-      warn(`${roleTag} LLM call budget exhausted, skipping mutation.`);
     }
 
 
@@ -322,15 +359,34 @@ export async function runWorker(
     if (shouldUseExtraEngines) {
       metrics.extraEngineQueries++;
       try {
-        const extraHits = await multiEngineSearch(
-          query, Math.min(task.searchResultsPerQuery, 8),
-          task.extraEngines as ReadonlyArray<SearchEngine>,
-          signal, () => limiter, task.timeRange ?? "all",
-          { serperApiKey: (task as any).serperApiKey, braveApiKey: (task as any).braveApiKey, rssFeedUrls: (task as any).rssFeedUrls, telegramChannels: (task as any).telegramChannels }
+        // Per-engine health gating: only fragile HTML-scrape engines that were
+        // built for no-key scraping get cooled down. Tracked set keeps reliable
+        // API/reference engines (serper, brave-api, openalex, crossref, arxiv,
+        // gdelt, reference, rss, telegram, ddg) running unconditionally.
+        const trackedEngines = new Set<SearchEngine>(["bing", "brave", "google", "scholar", "searxng", "mojeek", "yandex", "youtube"]);
+        const usableEngines = (task.extraEngines as ReadonlyArray<SearchEngine>).filter(
+          (engine) => !trackedEngines.has(engine) || health.isOtherEngineAvailable(engine),
         );
-        metrics.extraEngineHits += extraHits.length;
-        for (const h of extraHits) allHits.push({ ...h, query });
-        if (extraHits.length > 0) status(`${roleTag} -> ${extraHits.length} extra results`);
+        if (usableEngines.length === 0) {
+          warn(`${roleTag} All extra engines in cooldown, skipping extra-engine search.`);
+        } else {
+          const extraHits = await multiEngineSearch(
+            query, Math.min(task.searchResultsPerQuery, 8),
+            usableEngines,
+            signal, () => limiter, task.timeRange ?? "all",
+            { serperApiKey: (task as any).serperApiKey, braveApiKey: (task as any).braveApiKey, rssFeedUrls: (task as any).rssFeedUrls, telegramChannels: (task as any).telegramChannels }
+          );
+          metrics.extraEngineHits += extraHits.length;
+          for (const h of extraHits) allHits.push({ ...h, query });
+          if (extraHits.length > 0) status(`${roleTag} -> ${extraHits.length} extra results`);
+
+          // Record per-engine outcomes for health gating (empty counts as a miss)
+          for (const engine of usableEngines) {
+            if (!trackedEngines.has(engine)) continue;
+            const engineHits = extraHits.filter((h) => h.discoveredBy === engine).length;
+            health.recordOtherEngineHit(engine, engineHits);
+          }
+        }
       } catch {}
     }
   }
@@ -692,8 +748,37 @@ function uniqueHostCount(hits: ReadonlyArray<{ url: string }>): number {
   return hosts.size;
 }
 
-function mutationQuality(hits: ReadonlyArray<{ url: string }>): number {
-  return uniqueHostCount(hits) * 10 + Math.min(hits.length, 10);
+type RelevantHit = { url: string; title?: string; snippet?: string };
+
+function tokenizeQuery(query: string): Set<string> {
+  const stop = new Set(["the", "and", "for", "with", "from", "that", "how", "what", "why", "when", "are", "was", "were", "you", "your", "this", "its", "them", "they", "about", "into", "which", "their", "there", "where", "will", "would", "can", "could", "does", "doing", "over", "under", "also", "how", "much", "many", "more", "than", "then", "his", "her", "him", "who", "an", "or", "but", "not", "be", "is", "it", "to", "via", "vs", "per", "of", "in", "on", "at", "by", "as", "if", "its", "vs", "etc"]);
+  return new Set(
+    query
+      .toLowerCase()
+      .replace(/[^a-z0-9+\s]/gi, " ")
+      .split(/\s+/)
+      .filter((t) => t.length > 1 && !stop.has(t)),
+  );
+}
+
+function relevanceOverlap(hits: ReadonlyArray<RelevantHit>, query: string): number {
+  const terms = tokenizeQuery(query);
+  if (terms.size === 0) return uniqueHostCount(hits);
+  return hits.reduce((acc, h) => {
+    const haystack = `${h.url} ${h.title ?? ""} ${h.snippet ?? ""}`.toLowerCase();
+    for (const term of terms) {
+      if (haystack.includes(term)) return acc + 1;
+    }
+    return acc;
+  }, 0);
+}
+
+function mutationQuality(hits: ReadonlyArray<RelevantHit>, query: string): number {
+  // Reward both result diversity AND topical relevance to the original query so
+  // an off-topic mutation can't "win" purely on host count.
+  const diversity = uniqueHostCount(hits);
+  const relevance = Math.min(relevanceOverlap(hits, query), hits.length);
+  return relevance * 20 + diversity * 10 + Math.min(hits.length, 10);
 }
 
 function deduplicateByUrl<T extends { url: string }>(items: ReadonlyArray<T>): T[] {

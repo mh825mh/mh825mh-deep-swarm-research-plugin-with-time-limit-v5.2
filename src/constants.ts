@@ -38,7 +38,7 @@ export const DEPTH_PROFILES: Readonly<Record<DepthPreset, DepthProfile>> = {
     maxDecompositionWorkers: 6, maxGapFillQueries: 4, ddgRateLimitMs: 2_200, minRelevanceScore: 0.15,
     synthesisMaxSources: 15, synthesisSourceChars: 500, synthesisMaxTokens: 3_000, contradictionMaxSources: 10,
     stagnationThreshold: 1, searchPages: 1, searchLanes: 2, workerFanOut: 1,
-    extraEngines: ["brave", "mojeek", "yandex"], linkCrawlDepth: 1, queryMutationThreshold: 2,
+    extraEngines: ["bing", "brave"], linkCrawlDepth: 1, queryMutationThreshold: 2,
   },
   standard: {
     depthRounds: 3, pageBudgetPerWorker: 8, pageBudgetPerGapWorker: 6, defaultContentLimit: 6_000,
@@ -47,7 +47,7 @@ export const DEPTH_PROFILES: Readonly<Record<DepthPreset, DepthProfile>> = {
     maxDecompositionWorkers: 8, maxGapFillQueries: 5, ddgRateLimitMs: 2_000, minRelevanceScore: 0.13,
     synthesisMaxSources: 20, synthesisSourceChars: 500, synthesisMaxTokens: 4_000, contradictionMaxSources: 15,
     stagnationThreshold: 1, searchPages: 1, searchLanes: 2, workerFanOut: 1,
-    extraEngines: ["brave", "mojeek", "searxng", "yandex"], linkCrawlDepth: 1, queryMutationThreshold: 2,
+    extraEngines: ["bing", "brave", "searxng"], linkCrawlDepth: 1, queryMutationThreshold: 2,
   },
   deep: {
     depthRounds: 5, pageBudgetPerWorker: 10, pageBudgetPerGapWorker: 8, defaultContentLimit: 8_000,
@@ -56,7 +56,7 @@ export const DEPTH_PROFILES: Readonly<Record<DepthPreset, DepthProfile>> = {
     maxDecompositionWorkers: 10, maxGapFillQueries: 6, ddgRateLimitMs: 1_800, minRelevanceScore: 0.1,
     synthesisMaxSources: 30, synthesisSourceChars: 400, synthesisMaxTokens: 5_000, contradictionMaxSources: 20,
     stagnationThreshold: 2, searchPages: 2, searchLanes: 3, workerFanOut: 2,
-    extraEngines: ["brave", "mojeek", "searxng", "yandex"], linkCrawlDepth: 2, queryMutationThreshold: 3,
+    extraEngines: ["bing", "brave", "searxng"], linkCrawlDepth: 2, queryMutationThreshold: 3,
   },
   deeper: {
     depthRounds: 8, pageBudgetPerWorker: 15, pageBudgetPerGapWorker: 12, defaultContentLimit: 10_000,
@@ -65,7 +65,7 @@ export const DEPTH_PROFILES: Readonly<Record<DepthPreset, DepthProfile>> = {
     maxDecompositionWorkers: 12, maxGapFillQueries: 8, ddgRateLimitMs: 1_500, minRelevanceScore: 0.08,
     synthesisMaxSources: 40, synthesisSourceChars: 400, synthesisMaxTokens: 6_000, contradictionMaxSources: 25,
     stagnationThreshold: 2, searchPages: 2, searchLanes: 3, workerFanOut: 2,
-    extraEngines: ["brave", "mojeek", "scholar", "searxng", "yandex"], linkCrawlDepth: 2, queryMutationThreshold: 3,
+    extraEngines: ["bing", "scholar", "brave", "searxng"], linkCrawlDepth: 2, queryMutationThreshold: 3,
   },
   exhaustive: {
     depthRounds: 12, pageBudgetPerWorker: 20, pageBudgetPerGapWorker: 15, defaultContentLimit: 12_000,
@@ -74,7 +74,7 @@ export const DEPTH_PROFILES: Readonly<Record<DepthPreset, DepthProfile>> = {
     maxDecompositionWorkers: 14, maxGapFillQueries: 10, ddgRateLimitMs: 1_200, minRelevanceScore: 0.06,
     synthesisMaxSources: 50, synthesisSourceChars: 300, synthesisMaxTokens: 8_000, contradictionMaxSources: 30,
     stagnationThreshold: 3, searchPages: 3, searchLanes: 4, workerFanOut: 3,
-    extraEngines: ["brave", "scholar", "searxng", "mojeek", "yandex"], linkCrawlDepth: 3, queryMutationThreshold: 4,
+    extraEngines: ["bing", "scholar", "brave", "searxng"], linkCrawlDepth: 3, queryMutationThreshold: 4,
   },
 };
 

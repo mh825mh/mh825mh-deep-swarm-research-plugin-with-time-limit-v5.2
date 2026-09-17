@@ -1,7 +1,7 @@
 // src/net/search-engines.ts
 import type { SearchHit } from "../types";
 import { DdgRateLimiter, searchDDG } from "./ddg";
-import { fetchPage } from "./http";
+import { buildBrowserHeaders, fetchPage } from "./http";
 import { searchRssFeeds } from "./rss-engine";
 import { searchTelegram } from "./social-engines";
 import {
@@ -15,6 +15,7 @@ import {
 } from "./api-engines";
 
 export type SearchEngine =
+  | "bing"
   | "ddg"
   | "brave"
   | "google"
@@ -134,6 +135,7 @@ class EngineQueue {
 
 const engineQueues: Record<string, EngineQueue> = {
   ddg: new EngineQueue(4000),
+  bing: new EngineQueue(3500),
   brave: new EngineQueue(3500),
   google: new EngineQueue(5000), // Google is strict, needs 5s
   scholar: new EngineQueue(5000),
@@ -175,7 +177,6 @@ async function searchGoogleScholar(query: string, maxResults: number, signal: Ab
 async function searchSearxng(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
   const endpoints = [
     `https://searx.be/search?q=${encodeURIComponent(query)}&format=html`,
-    `https://search.ononoki.org/search?q=${encodeURIComponent(query)}&format=html`,
   ];
   for (const endpoint of endpoints) {
     const hits = await searchHtmlEndpoint(endpoint, "searxng", maxResults, signal);
@@ -193,7 +194,151 @@ async function searchYandex(query: string, maxResults: number, signal: AbortSign
 }
 
 async function searchYouTube(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
-  return searchHtmlEndpoint(`https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`, "youtube", maxResults, signal);
+  return searchInnerTube(query, maxResults, signal);
+}
+
+// Bing HTML results embed the real target as a base64 `u=` query param inside
+// https://www.bing.com/ck/a? links. Decode it to get the actual destination URL.
+function decodeBingTarget(href: string): string | null {
+  try {
+    const url = new URL(href.replace(/&amp;/g, "&"));
+    if (url.hostname !== "www.bing.com" && !url.hostname.endsWith(".bing.com")) return href.startsWith("http") ? href : null;
+    const encoded = url.searchParams.get("u");
+    if (!encoded) return null;
+    // YouTube/Bing encodes as "a1" + base64. Strip prefix and ignore relative refs.
+    const b64 = encoded.startsWith("a1") ? encoded.slice(2) : encoded;
+    if (b64.startsWith("L2")) return null; // /images/, /videos/, /maps/ internal refs
+    const decoded = Buffer.from(b64, "base64").toString("utf8");
+    return decoded.startsWith("http") ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
+async function searchBing(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
+  if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+  const queue = engineQueues["bing"] || new EngineQueue(4000);
+  return queue.run(async () => {
+    try {
+      const response = await fetchPage(
+        `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${Math.min(maxResults, 20)}&setlang=en`,
+        signal,
+      );
+      const hits: SearchHit[] = [];
+      const seen = new Set<string>();
+      // Each result is a <li class="b_algo"> block with <h2><a href target>title</a></h2>
+      // plus a <p class="b_lineclamp..."> snippet.
+      const algoRe = /<li class="b_algo"[\s\S]*?<\/li>/gi;
+      let match: RegExpExecArray | null;
+      while (hits.length < maxResults && (match = algoRe.exec(response.html)) !== null) {
+        const block = match[0];
+        const linkRe = /<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i;
+        const lm = block.match(linkRe);
+        if (!lm) continue;
+        const real = decodeBingTarget(lm[1]);
+        if (!real) continue;
+        const title = stripHtml(lm[2]);
+        const capRe = block.match(/<p class="b_lineclamp[^"]*"[^>]*>([\s\S]*?)<\/p>/i);
+        const snippet = capRe ? stripHtml(capRe[1]) : "";
+        const key = normaliseUrl(real);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        hits.push({ url: real, title, snippet, discoveredBy: "bing" });
+      }
+      return dedupeHits(hits, maxResults);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") throw error;
+      return [];
+    }
+  });
+}
+
+const INNERTUBE_SEARCH_URL = "https://www.youtube.com/youtubei/v1/search";
+const INNERTUBE_WEB_CLIENT = {
+  client: {
+    clientName: "WEB",
+    clientVersion: "2.20240814.00.00",
+    hl: "en",
+    gl: "US",
+  },
+};
+
+function collectVideoRenderer(node: any, sink: (renderer: any) => void): void {
+  if (!node || typeof node !== "object") return;
+  if (node.videoRenderer) sink(node.videoRenderer);
+  for (const value of Object.values(node)) collectVideoRenderer(value, sink);
+}
+
+// YouTube's HTML results page is JS-rendered (only relative /watch?v= links that
+// parseSearchLinks skips). POST to the innerTube search endpoint instead with the
+// same WEB client that the web page uses — returns real video results.
+async function searchInnerTube(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
+  if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+  const queue = engineQueues["youtube"] || new EngineQueue(3000);
+  return queue.run(async () => {
+    try {
+      const pageRes = await fetchQueryPage("https://www.youtube.com/results?search_query=deep+learning", signal);
+      if (!pageRes) return [];
+      const keyMatch = pageRes.html.match(/"INNERTUBE_API_KEY":"([^"]+)"/);
+      if (!keyMatch) return [];
+      const apiKey = keyMatch[1];
+
+      const res = await fetch(`${INNERTUBE_SEARCH_URL}?key=${encodeURIComponent(apiKey)}`, {
+        method: "POST",
+        signal,
+        headers: {
+          "Content-Type": "application/json",
+          ...buildBrowserHeaders(INNERTUBE_SEARCH_URL),
+        },
+        body: JSON.stringify({ context: INNERTUBE_WEB_CLIENT, query }),
+      });
+      if (!res.ok) return [];
+      const data = (await res.json()) as Record<string, any>;
+
+      const out: SearchHit[] = [];
+      const seen = new Set<string>();
+      collectVideoRenderer(data, (v: any) => {
+        if (out.length >= maxResults) return;
+        const id = v.videoId;
+        if (!id || seen.has(id)) return;
+        seen.add(id);
+        const title = v.title?.runs?.[0]?.text ?? "";
+        const owner = v.ownerText?.runs?.[0]?.text ?? "";
+        const published = v.publishedTimeText?.simpleText ?? "";
+        const lengthText = v.lengthText?.simpleText ?? "";
+        const desc =
+          v.detailedMetadataSnippets?.[0]?.snippetText?.runs?.map((r: any) => r.text ?? "").join("") ??
+          v.descriptionSnippet?.runs?.map((r: any) => r.text ?? "").join("") ??
+          "";
+        if (!id || !title) return;
+        out.push({
+          url: `https://www.youtube.com/watch?v=${id}`,
+          title,
+          snippet: [desc, owner, published, lengthText].filter(Boolean).join(" · "),
+          discoveredBy: "youtube",
+        });
+      });
+      return dedupeHits(out, maxResults);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") throw error;
+      return [];
+    }
+  });
+}
+
+async function fetchQueryPage(url: string, signal: AbortSignal): Promise<{ html: string } | null> {
+  try {
+    const response = await fetch(url, {
+      signal,
+      redirect: "follow",
+      headers: buildBrowserHeaders(url),
+    });
+    if (!response.ok) return null;
+    return { html: await response.text() };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    return null;
+  }
 }
 
 export async function multiEngineSearch(
@@ -220,6 +365,7 @@ export async function multiEngineSearch(
             const limiter = limiterFactory();
             return searchDDG(query, perEngineLimit, "moderate", signal, limiter, timeRange);
           }
+          case "bing": return searchBing(query, perEngineLimit, signal);
           case "brave": return searchBrave(query, perEngineLimit, signal);
           case "google": return searchGoogle(query, perEngineLimit, signal);
           case "scholar": return searchGoogleScholar(query, perEngineLimit, signal);

@@ -30,7 +30,8 @@ export class SearchHealthTracker {
   public ddg: EngineHealth = this.freshState();
   public searxng: EngineHealth = this.freshState();
   public api: EngineHealth = this.freshState();
-  
+  public readonly otherEngines: Record<string, EngineHealth> = {};
+
   public gaps: GapRecord[] = [];
   public apiCallsMade: number = 0;
   public localChunksRetrieved: number = 0;
@@ -97,6 +98,42 @@ export class SearchHealthTracker {
     return this.apiCallsMade < 3;
   }
 
+  public isOtherEngineAvailable(engine: string): boolean {
+    const state = this.otherEngines[engine];
+    if (!state) return true;
+    if (state.state === "TEMPORARILY_UNHEALTHY") {
+      if (Date.now() >= (state.cooldownExpiry ?? 0)) {
+        state.state = "HEALTHY";
+        state.consecutiveFailures = 0;
+        state.cooldownExpiry = null;
+        return true;
+      }
+      return false;
+    }
+    return state.state !== "DISABLED";
+  }
+
+  public recordOtherEngineHit(engine: string, hitCount: number, reason?: string) {
+    const state = (this.otherEngines[engine] = this.otherEngines[engine] ?? this.freshState());
+    state.searchesAttempted++;
+    if (hitCount >= 1) {
+      state.validResults++;
+      state.consecutiveFailures = 0;
+      state.state = "HEALTHY";
+      state.cooldownExpiry = null;
+      state.lastFailureReason = null;
+    } else {
+      state.emptyResults++;
+      state.consecutiveFailures++;
+      state.blocks++;
+      if (reason) state.lastFailureReason = reason;
+      if (state.consecutiveFailures >= 3) {
+        state.state = "TEMPORARILY_UNHEALTHY";
+        state.cooldownExpiry = Date.now() + (11 * 60 * 1000);
+      }
+    }
+  }
+
   public generateReport(): string {
     return `
 ══════════════════════════════════════════════════════════════
@@ -122,6 +159,9 @@ SEARXNG HEALTH
 - State: ${this.searxng.state}
 - Searches attempted: ${this.searxng.searchesAttempted}
 - Valid results: ${this.searxng.validResults}
+
+OTHER ENGINES HEALTH
+${Object.entries(this.otherEngines).map(([name, e]) => `- ${name}: ${e.state} (${e.searchesAttempted} attempts, ${e.validResults} valid, cooldown ${e.cooldownExpiry ? new Date(e.cooldownExpiry).toISOString() : "None"})`).join("\n") || "- No extra engines probed yet"}
 
 API GAP FILLING
 - API eligible: ${this.canUseApi() ? 'YES' : 'NO'}
