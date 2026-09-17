@@ -1,8 +1,18 @@
-# 🐝 Deep Research w/ Swarm Agent (v5.3.4)
+# 🐝 Deep Research w/ Swarm Agent (v5.3.5)
 
 
 
 Autonomous deep research for LM Studio. A swarm of specialized AI workers searches your local documents and the web, dynamically adapting its strategy, verifying claims, and synthesizing everything into a structured, confidence-scored report with auditable citations—all in one tool call.
+
+## 🚀 What's New in v5.3.5?
+
+* **SSRF hardening:** a dedicated, unit-tested SSRF guard now blocks internal/private targets, IPv4-mapped forms, numeric-obfuscated addresses, special-use DNS suffixes (`.local`, `.internal`, `.home.arpa`), and DNS-rebinding attempts before any request is made.
+* **Archive-on-failure:** when a page fails every fetch tier, the plugin submits it once per run to the Wayback Machine (`/save/`), writes a local log to `~/.deep-swarm-research/archives.json`, and reports archived pages in the run-health footer.
+* **RSS & Telegram feeds:** optional `rssFeedUrls` and `telegramChannels` in `api-keys.json` let workers mine feeds and public channels as extra evidence sources.
+* **Run-health footer:** every report now ends with a compact 🔍 Query Log / 🚦 Source Health / 🤖 LLM Watchdog / 💾 Cache & Archives summary (DDG state, LLM calls used, cache entries, archives submitted).
+* **Cache duration in days:** the Cache Duration setting is now interpreted as days (default 30) instead of months.
+* **Hardened archive fallback list:** dead or risky mirrors (Google webcache, corsproxy.io, allorigins, cors-anywhere, freezedry) were removed; only resilient maintained archives (Wayback Machine, archive.today) remain.
+* **Tests & CI:** a Vitest suite (SSRF, URL normalization, archiver logic) plus a GitHub Actions workflow (typecheck, test, audit) keep regressions out.
 
 ## 🚀 What's New in v5.3.4?
 
@@ -79,11 +89,13 @@ Run the plugin once to auto-generate the keys file at:
 {
   "serperApiKey": "YOUR_SERPER_KEY",
   "braveApiKey": "YOUR_BRAVE_KEY",
-  "crossrefMailto": "you@example.com"
+  "crossrefMailto": "you@example.com",
+  "rssFeedUrls": ["https://feeds.bbci.co.uk/news/rss.xml"],
+  "telegramChannels": ["channelname"]
 }
-
 ```
 The optional `crossrefMailto` is used in the Crossref API User-Agent header (required by Crossref for polite pool access).
+The optional `rssFeedUrls` and `telegramChannels` enable RSS/Telegram mining as extra evidence sources during research.
 
 **2. Local Document Sources (RAG)**
 
@@ -295,14 +307,16 @@ For organizations with large datalakes, the plugin searches in priority order:
 | **YouTube Search**<br> | Enable YouTube scraping and transcript extraction.
 
  |
+| **Cache Duration**<br> | Days to reuse previously visited pages (default 30). 0 disables caching. |
 | **FlareSolverr URL**<br> | Advanced: Local endpoint for Cloudflare bypass (e.g., `[http://127.0.0.1:8191/v1](http://127.0.0.1:8191/v1)`).
 
- |
+  |
 
 ---
 
 ## 📜 Changelog
 
+* **v5.3.5** - SSRF guard hardened & unit-tested (internal/private IPs, DNS-rebinding, obfuscated addresses, `.local`/`.home.arpa`), archive-on-failure to the Wayback Machine with a local log, RSS & Telegram feed mining, run-health footer on every report, cache duration in days, archive fallback list pruned to resilient mirrors only, and a Vitest suite + GitHub Actions CI.
 * **v5.3.4** - Config wiring fix (Cache Duration, Context Budget, Isolation, LLM Call Budget, FlareSolverr, Crossref email now reach the run), active 2-minute stall watchdog with partial-result flush, session-time/LLM-budget cap alignment (`0 = unlimited`), DDG health threshold aligned to the 1-result tripwire, Waterfall fetcher wired into the live fetch path (got-scraping/FlareSolverr/Wayback), SDK-based query mutation (no hard-coded port), configurable Crossref User-Agent, ReadSkillFile tool registered, coverage-table marks, and duplicate-interface cleanup.
 * **v5.3.3** - Entity-first query planning, strict relevance pre-filtering, time-budget synthesis reservation, and claim strength verification.
 * **v5.3.2** - Multi-tier waterfall fetcher, FlareSolverr Cloudflare bypass, DOM parser crash fix, and AI query planner overhaul.
