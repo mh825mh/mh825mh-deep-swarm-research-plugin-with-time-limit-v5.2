@@ -1,12 +1,20 @@
-# 🐝 Deep Research w/ Swarm Agent (v5.3.3)
+# 🐝 Deep Research w/ Swarm Agent (v5.3.4)
 
 
 
 Autonomous deep research for LM Studio. A swarm of specialized AI workers searches your local documents and the web, dynamically adapting its strategy, verifying claims, and synthesizing everything into a structured, confidence-scored report with auditable citations—all in one tool call.
 
-## 🚀 What's New in v5.3.3?
+## 🚀 What's New in v5.3.4?
 
-This release introduces an advanced cognitive and architectural overhaul focused on strict factuality, elimination of noise, and intelligent time budgeting.
+* **Config fields now work:** Cache Duration, Context Budget Mode, Manual Context Limit, Max Synthesis Tokens, LLM Context Isolation, LLM Call Budget, FlareSolverr URL, and Crossref email all reach the live run.
+* **Stall watchdog is live:** a 2-minute no-progress detector aborts workers and flushes partial results to synthesis instead of hanging forever.
+* **Session time fixed:** `0` = no explicit cap; the effective crawl deadline is now `min(session, LLM watchdog runtime)` so the two settings stop overriding each other.
+* **Waterfall fetcher wired in:** worker fetching now cascades standard fetch → got-scraping → FlareSolverr → Wayback Machine.
+* **Query mutation via the SDK:** the hard-coded `localhost:1234` endpoint is gone; the loaded LM Studio model is used, on any port.
+* **DDG health aligned:** 1 result is a success (matching the tripwire), so tight queries no longer fake-block DDG into 11-minute cooldowns.
+* **Misc fixes:** `ReadSkillFile` tool registered, coverage-table ✓/— marks, duplicate-type cleanup, and a configurable Crossref User-Agent.
+
+The **v5.3.3** release introduced an advanced cognitive and architectural overhaul focused on strict factuality, elimination of noise, and intelligent time budgeting.
 
 **🔍 1. Relevance, Not "Coverage"**
 
@@ -70,10 +78,12 @@ Run the plugin once to auto-generate the keys file at:
 ```json
 {
   "serperApiKey": "YOUR_SERPER_KEY",
-  "braveApiKey": "YOUR_BRAVE_KEY"
+  "braveApiKey": "YOUR_BRAVE_KEY",
+  "crossrefMailto": "you@example.com"
 }
 
 ```
+The optional `crossrefMailto` is used in the Crossref API User-Agent header (required by Crossref for polite pool access).
 
 **2. Local Document Sources (RAG)**
 
@@ -93,6 +103,9 @@ Want the swarm to research your proprietary files alongside the web? Use the `RA
 
 
 * **Read Page / Multi-Read:** Fetch and extract up to 10 URLs concurrently. Handles PDFs automatically.
+
+
+* **ReadSkillFile:** Load a specialized formatting/domain skill file before synthesizing research.
 
 
 
@@ -273,7 +286,7 @@ For organizations with large datalakes, the plugin searches in priority order:
 | **LLM Context Isolation**<br> | Strict isolation. Prevents history bleed.
 
  |
-| **Max Session Time**<br> | Hard cap on wall-clock time (minutes; automatically reserves 20% for final synthesis).
+| **Max Session Time**<br> | Hard cap on wall-clock time (minutes; automatically reserves 20% for final synthesis). Set to **0** for no explicit cap (still bounded by the LLM call watchdog runtime).
 
  |
 | **Academic APIs**<br> | Query OpenAlex, Crossref, and arXiv directly for papers.
@@ -290,6 +303,7 @@ For organizations with large datalakes, the plugin searches in priority order:
 
 ## 📜 Changelog
 
+* **v5.3.4** - Config wiring fix (Cache Duration, Context Budget, Isolation, LLM Call Budget, FlareSolverr, Crossref email now reach the run), active 2-minute stall watchdog with partial-result flush, session-time/LLM-budget cap alignment (`0 = unlimited`), DDG health threshold aligned to the 1-result tripwire, Waterfall fetcher wired into the live fetch path (got-scraping/FlareSolverr/Wayback), SDK-based query mutation (no hard-coded port), configurable Crossref User-Agent, ReadSkillFile tool registered, coverage-table marks, and duplicate-interface cleanup.
 * **v5.3.3** - Entity-first query planning, strict relevance pre-filtering, time-budget synthesis reservation, and claim strength verification.
 * **v5.3.2** - Multi-tier waterfall fetcher, FlareSolverr Cloudflare bypass, DOM parser crash fix, and AI query planner overhaul.
 

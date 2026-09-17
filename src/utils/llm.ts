@@ -1,5 +1,51 @@
 // src/utils/llm.ts
+import { LMStudioClient } from "@lmstudio/sdk";
 import { LlmCallBudget, RunWatchdog, ContextIsolationMode } from "../types";
+
+export interface AskModelOptions {
+  readonly system?: string;
+  readonly maxTokens?: number;
+  readonly temperature?: number;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+}
+
+export async function askLoadedModel(
+  prompt: string,
+  options: AskModelOptions = {},
+): Promise<string | null> {
+  if (options.signal?.aborted) return null;
+  const {
+    system,
+    maxTokens = 400,
+    temperature = 0.7,
+    timeoutMs = 60_000,
+  } = options;
+
+  try {
+    const client = new LMStudioClient();
+    const models = await Promise.race([
+      client.llm.listLoaded(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("timeout")), timeoutMs),
+      ),
+    ]);
+    if (!Array.isArray(models) || models.length === 0) return null;
+    const model = await client.llm.model(models[0].identifier);
+    const messages: Array<{ role: "system" | "user"; content: string }> = system
+      ? [
+          { role: "system", content: system },
+          { role: "user", content: prompt },
+        ]
+      : [{ role: "user", content: prompt }];
+    const stream = model.respond(messages, { maxTokens, temperature });
+    let result = "";
+    for await (const chunk of stream) result += chunk.content ?? "";
+    return result.trim() || null;
+  } catch {
+    return null;
+  }
+}
 
 const BUDGETS: Record<string, LlmCallBudget> = {
   compact: { mode: "compact", maxGlobalCalls: 20, maxCallsPerWorker: 3, maxRuntimeMs: 10 * 60 * 1000, warningThresholdMs: 8 * 60 * 1000 },
@@ -12,10 +58,12 @@ export class LlmCallManager {
   public budget: LlmCallBudget;
   public watchdog: RunWatchdog;
   public isolationMode: ContextIsolationMode;
+  private readonly _abortController: AbortController;
 
   constructor(mode: string = "standard", isolationMode: ContextIsolationMode = "strict") {
     this.budget = BUDGETS[mode] || BUDGETS.standard;
     this.isolationMode = isolationMode;
+    this._abortController = new AbortController();
     this.watchdog = {
       llmCallsMade: 0,
       workerCalls: new Map(),
@@ -23,6 +71,17 @@ export class LlmCallManager {
       stalled: false,
       lastProgressTime: Date.now(),
     };
+  }
+
+  public get signal(): AbortSignal {
+    return this._abortController.signal;
+  }
+
+  public abort(): void {
+    if (!this._abortController.signal.aborted) {
+      this._abortController.abort();
+      this.watchdog.stalled = true;
+    }
   }
 
   public canCall(workerId: string): boolean {

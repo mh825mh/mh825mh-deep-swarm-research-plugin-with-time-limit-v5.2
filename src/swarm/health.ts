@@ -65,14 +65,14 @@ export class SearchHealthTracker {
 
     public recordDdgSuccess(hitCount: number) {
     this.ddg.searchesAttempted++;
-    if (hitCount >= 3) {
+    if (hitCount >= 1) {
       this.ddg.validResults++;
       this.ddg.consecutiveFailures = 0;
       this.ddg.state = "HEALTHY";
       this.ddg.cooldownExpiry = null;
     } else {
       this.ddg.emptyResults++;
-      this.recordDdgFailure("INVALID_RESULT_SET (< 3 results)");
+      this.recordDdgFailure("INVALID_RESULT_SET (0 results)");
     }
   }
 

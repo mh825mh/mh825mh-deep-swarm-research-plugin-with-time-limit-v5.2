@@ -1,5 +1,5 @@
 import { logLlmDiagnostics } from "../utils/tokens";
-import { LMStudioClient } from "@lmstudio/sdk";
+import { askLoadedModel } from "../utils/llm";
 import {
   QueryPlan,
   WorkerRole,
@@ -34,32 +34,12 @@ async function callLoadedModel(
   temperature: number = AI_PLANNING_TEMPERATURE,
   timeoutMs: number = AI_PLANNING_TIMEOUT_MS,
 ): Promise<string | null> {
-  try {
-    const client = new LMStudioClient();
-    const models = await Promise.race<Awaited<ReturnType<typeof client.llm.listLoaded>>>([
-      client.llm.listLoaded(),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("timeout")), timeoutMs),
-      ),
-    ]);
-    if (!Array.isArray(models) || models.length === 0) return null;
-    const model = await client.llm.model(models[0].identifier);
-    const stream = model.respond(
-      [
-        { role: "system", content: SYSTEM_INSTRUCTIONS },
-        { role: "user", content: prompt },
-      ],
-      {
-        maxTokens,
-        temperature,
-      },
-    );
-    let result = "";
-    for await (const chunk of stream) result += chunk.content ?? "";
-    return result.trim() || null;
-  } catch {
-    return null;
-  }
+  return askLoadedModel(prompt, {
+    system: SYSTEM_INSTRUCTIONS,
+    maxTokens,
+    temperature,
+    timeoutMs,
+  });
 }
 
 function parseLines(raw: string, maxLines: number = 6): ReadonlyArray<string> {

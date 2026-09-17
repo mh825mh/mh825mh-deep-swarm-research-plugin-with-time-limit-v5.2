@@ -9,6 +9,7 @@ const KEYS_FILE = path.join(KEYS_DIR, "api-keys.json");
 export interface UserKeys {
   readonly serperApiKey?: string;
   readonly braveApiKey?: string;
+  readonly crossrefMailto?: string;
 }
 
 function ensureTemplate(): void {
@@ -21,6 +22,7 @@ function ensureTemplate(): void {
         {
           serperApiKey: "",
           braveApiKey: "",
+          crossrefMailto: "",
         },
         null,
         2,
@@ -47,6 +49,7 @@ export function loadUserKeys(): UserKeys {
     return {
       serperApiKey: cleanStr(parsed.serperApiKey),
       braveApiKey: cleanStr(parsed.braveApiKey),
+      crossrefMailto: cleanStr(parsed.crossrefMailto),
     };
   } catch (err) {
     console.error(

@@ -69,11 +69,6 @@ export interface CompiledReport {
   readonly timeoutReason?: string;
 }
 
-export interface Outlink {
-  readonly text: string;
-  readonly href: string;
-}
-
 export type SourceTier =
   | "academic"
   | "government"
@@ -146,6 +141,7 @@ export interface SwarmTask {
   readonly timeRange?: "all" | "year" | "month" | "week" | "day";
   readonly serperApiKey?: string;
   readonly braveApiKey?: string;
+  readonly flaresolverrUrl?: string;
 }
 
 
@@ -246,16 +242,6 @@ export interface ReportSource {
 }
 
 
-export interface CompiledReport {
-  readonly markdown: string;
-  readonly sources: ReadonlyArray<ReportSource>;
-  readonly topicKeywords: ReadonlyArray<string>;
-  readonly coveredDims: ReadonlyArray<string>;
-  readonly gapDims: ReadonlyArray<string>;
-  readonly aiSynthesis?: string;
-  readonly contradictions: ReadonlyArray<ContradictionEntry>;
-}
-
 export interface ResearchConfig {
     readonly contextBudgetMode?: "auto" | "conservative" | "manual";
   readonly manualContextLimit?: number;
@@ -297,6 +283,8 @@ export interface ResearchConfig {
 
   readonly engineSelectionMode?: "adaptive" | "benchmark" | "priority";
   readonly cacheDuration?: string;
+  readonly flaresolverrUrl?: string;
+  readonly crossrefMailto?: string;
   readonly enableXSearch?: boolean;
   readonly enableYouTube?: boolean;
   readonly enableAcademicAPIs?: boolean;
@@ -310,20 +298,6 @@ export interface ResearchResult {
   readonly queriesUsed: ReadonlyArray<string>;
   readonly totalSources: number;
   readonly totalRounds: number;
-}
-
-export interface EvidenceCard {
-  readonly id: string;
-  readonly entityType: "book" | "podcast" | "standard" | "article" | "local document" | "web";
-  readonly title: string;
-  readonly authorOrHost: string;
-  readonly canonicalUrl: string;
-  readonly sourceTier: SourceTier;
-  readonly relevantClaim: string;
-  readonly supportingExcerpt: string;
-  readonly confidence: "High" | "Medium" | "Low";
-  readonly freshness: string | null;
-  readonly worker: string;
 }
 
 export interface ContextBudget {
@@ -349,16 +323,6 @@ export interface RunWatchdog {
   startTime: number;
   stalled: boolean;
   lastProgressTime: number;
-}
-// Add to SearchHit interface
-export interface SearchHit {
-  readonly title: string;
-  readonly url: string;
-  readonly snippet: string;
-  readonly discoveredBy?: string;
-  readonly requestedRoute?: string; // "DDG", "SearxNG", "Direct"
-  readonly actualBackend?: string;  // "DDG", "Yandex", "Bing"
-  readonly resultDomain?: string;   // "cambridge.org", "orx.org"
 }
 
 export type StatusFn = (message: string) => void;

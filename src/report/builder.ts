@@ -461,7 +461,7 @@ function buildHeader(
 function buildCoverageTable(coveredIds: ReadonlyArray<string>): string {
   const covered = new Set(coveredIds);
   const rows = DIMENSIONS.map(
-    (d) => `| ${covered.has(d.id) ? "" : ""} | **${d.label}** |`,
+    (d) => `| ${covered.has(d.id) ? "✓" : "—"} | **${d.label}** |`,
   );
   return [
     `## Research Dimension Coverage`,

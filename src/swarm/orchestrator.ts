@@ -231,7 +231,8 @@ function buildTaskBase(
   | "serperApiKey"
   | "braveApiKey"
   | "enableYouTube"
-> & { flaresolverrUrl?: string } { // <--- Added type extension here to prevent TypeScript errors
+  | "flaresolverrUrl"
+> {
   return {
     contentLimit: cfg.contentLimitPerPage,
     safeSearch: cfg.safeSearch,
@@ -254,7 +255,7 @@ function buildTaskBase(
     serperApiKey: cfg.serperApiKey,
     braveApiKey: cfg.braveApiKey,
     enableYouTube: cfg.enableYouTube,
-    flaresolverrUrl: (cfg as any).flaresolverrUrl, // <--- THIS grabs the URL from the UI!
+    flaresolverrUrl: cfg.flaresolverrUrl,
   };
 }
 
@@ -361,34 +362,47 @@ async function runTaskGroup(
   health: SearchHealthTracker,
   llmManager: LlmCallManager
 ): Promise<WorkerResult[]> {
-  return Promise.all(
-    tasks.map((task) => {
-      const limiter = pool.next();
-      return runWorker(
-        task,
-        state,
-        signal,
-        status,
-        warn,
-        topicKeywords,
-        limiter,
-        health,
-        llmManager
-      ).catch((err: unknown) => {
-        if (!isAbortError(err)) {
-          warn(`[${task.label}] crashed: ${err instanceof Error ? err.message : String(err)}`);
-        }
-        return {
-          taskId: task.id,
-          role: task.role,
-          label: task.label,
-          sources: [],
-          queries: [],
-          errors: [String(err)],
-        } satisfies WorkerResult;
-      });
-    }),
-  );
+  const combined = combineAbortSignals(signal, llmManager.signal);
+
+  const watchdog = setInterval(() => {
+    if (llmManager.checkStall() && !llmManager.signal.aborted) {
+      llmManager.abort();
+      warn("[WATCHDOG] Stall detected (no accepted sources for 2 minutes). Flushing partial results to synthesis.");
+    }
+  }, 10_000);
+
+  try {
+    return await Promise.all(
+      tasks.map((task) => {
+        const limiter = pool.next();
+        return runWorker(
+          task,
+          state,
+          combined,
+          status,
+          warn,
+          topicKeywords,
+          limiter,
+          health,
+          llmManager
+        ).catch((err: unknown) => {
+          if (!isAbortError(err)) {
+            warn(`[${task.label}] crashed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          return {
+            taskId: task.id,
+            role: task.role,
+            label: task.label,
+            sources: [],
+            queries: [],
+            errors: [String(err)],
+          } satisfies WorkerResult;
+        });
+      }),
+    );
+  } finally {
+    clearInterval(watchdog);
+  }
 }
 
 export interface OrchestratorResult {
@@ -530,13 +544,16 @@ export async function runSwarm(
     return task;
   });
 
-  const maxSessionTimeMs = cfg.maxSessionMs || 30 * 60 * 1000;
+  const maxSessionTimeMs = Math.min(
+    cfg.maxSessionMs && cfg.maxSessionMs > 0 ? cfg.maxSessionMs : Infinity,
+    llmManager.budget.maxRuntimeMs,
+  );
   const startTime = Date.now();
   const crawlDeadline = startTime + (maxSessionTimeMs * 0.80); // Reserve 20% for synthesis
 
   for (const layer of ["DDG", "SEARXNG", "DIRECT", "API"]) {
-    if (Date.now() >= crawlDeadline || signal.aborted || externalTasks.length === 0) {
-      fileWarn(`[TIME ALLOCATION] Crawl budget elapsed or tasks finished. Transitioning to verification & synthesis.`);
+    if (Date.now() >= crawlDeadline || signal.aborted || llmManager.signal.aborted || externalTasks.length === 0) {
+      fileWarn(`[TIME ALLOCATION] Crawl budget elapsed, swarm stalled, or tasks finished. Transitioning to verification & synthesis.`);
       break;
     }
 
@@ -647,6 +664,30 @@ function safeHostname(url: string): string {
 
 function isAbortError(err: unknown): boolean {
   return err instanceof DOMException && err.name === "AbortError";
+}
+
+function combineAbortSignals(a: AbortSignal, b: AbortSignal): AbortSignal {
+  const ctor = AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal };
+  if (typeof ctor.any === "function") {
+    try {
+      return ctor.any([a, b]);
+    } catch {
+      // fall through to manual composition
+    }
+  }
+  const composite = new AbortController();
+  const onAbort = () => composite.abort();
+  if (a.aborted || b.aborted) {
+    composite.abort();
+  } else {
+    a.addEventListener("abort", onAbort);
+    b.addEventListener("abort", onAbort);
+  }
+  composite.signal.addEventListener("abort", () => {
+    a.removeEventListener("abort", onAbort);
+    b.removeEventListener("abort", onAbort);
+  });
+  return composite.signal;
 }
 
 function aggregateResults(

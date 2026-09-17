@@ -57,6 +57,14 @@ function readConfig(ctl: any) {
     enableLocalSources: false,                // NEW
     serperApiKey: undefined as string | undefined,
     braveApiKey: undefined as string | undefined,
+    cacheDuration: "30",
+    contextBudgetMode: "auto",
+    manualContextLimit: 8192,
+    maxSynthesisInputTokens: 18000,
+    contextIsolation: "strict",
+    llmCallMode: "standard",
+    flaresolverrUrl: "",
+    crossrefMailto: "",
       };
 
   try {
@@ -120,7 +128,40 @@ function readConfig(ctl: any) {
 
       serperApiKey: serperKey,
       braveApiKey: braveKey,
-      
+
+      cacheDuration: typeof cfg.cacheDuration === "string" && cfg.cacheDuration.trim()
+        ? cfg.cacheDuration
+        : fallback.cacheDuration,
+
+      contextBudgetMode:
+        cfg.contextBudgetMode === "conservative" || cfg.contextBudgetMode === "manual"
+          ? cfg.contextBudgetMode
+          : fallback.contextBudgetMode,
+
+      manualContextLimit: Number(
+        cfg.manualContextLimit ?? fallback.manualContextLimit,
+      ),
+
+      maxSynthesisInputTokens: Number(
+        cfg.maxSynthesisInputTokens ?? fallback.maxSynthesisInputTokens,
+      ),
+
+      contextIsolation:
+        cfg.contextIsolation === "worker_reuse" || cfg.contextIsolation === "advanced_reuse"
+          ? cfg.contextIsolation
+          : fallback.contextIsolation,
+
+      llmCallMode:
+        cfg.llmCallMode === "compact" || cfg.llmCallMode === "deep" || cfg.llmCallMode === "extended"
+          ? cfg.llmCallMode
+          : fallback.llmCallMode,
+
+      flaresolverrUrl:
+        typeof cfg.flaresolverrUrl === "string" && cfg.flaresolverrUrl.trim()
+          ? cfg.flaresolverrUrl.trim()
+          : "",
+
+      crossrefMailto: fileKeys.crossrefMailto || "",
     };
   } catch {
     return fallback;
@@ -191,13 +232,19 @@ const result = await runDeepResearch(
     enableReferenceSearch: ui.enableReferenceSearch,
     serperApiKey: ui.serperApiKey,
     braveApiKey: ui.braveApiKey,
-    
+    cacheDuration: ui.cacheDuration,
+    contextBudgetMode: ui.contextBudgetMode,
+    manualContextLimit: ui.manualContextLimit,
+    maxSynthesisInputTokens: ui.maxSynthesisInputTokens,
+    contextIsolation: ui.contextIsolation,
+    llmCallMode: ui.llmCallMode,
+    flaresolverrUrl: ui.flaresolverrUrl,
+    crossrefMailto: ui.crossrefMailto,
+
     maxSessionMs:
       typeof args.sessionTimeoutMinutes === "number"
         ? args.sessionTimeoutMinutes * 60_000
-        : ui.maxSessionMinutes > 0
-          ? ui.maxSessionMinutes * 60_000
-          : undefined,
+        : ui.maxSessionMinutes * 60_000,
 
     // ONLY these two lines changed:
     enableLocalSources: args.enableLocalSources ?? ui.enableLocalSources,
@@ -1389,6 +1436,7 @@ if (removed) {
     researchReadPageTool,
     researchMultiReadTool,
     pdfBatchReadTool,
+    readSkillFileTool,
     ragAddLibraryTool,
     ragListLibrariesTool,
     ragRemoveLibraryTool,

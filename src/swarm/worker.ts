@@ -1,6 +1,7 @@
 // src/swarm/worker.ts
-import { LlmCallManager } from "../utils/llm";
+import { LlmCallManager, askLoadedModel } from "../utils/llm";
 import { logLlmDiagnostics } from "../utils/tokens";
+import { fetchWithWaterfall } from "../net/waterfallFetcher";
 import { extractYouTubeTranscript } from "../net/youtube-extractor";
 import {
   searchSerper,
@@ -635,80 +636,44 @@ async function getLLMQueryMutation(
   topSnippets: string[],
   signal: AbortSignal,
 ): Promise<string | null> {
-  try {
-    const endpoint = "http://localhost:1234/v1/chat/completions";
-    const prompt = `You are a deep research assistant. The initial query "${query}" yielded these snippets:\n${topSnippets.slice(0, 3).join("\n")}\n\nGenerate ONE highly specific, alternative search query to find missing technical details or counter-arguments. Return ONLY the raw query string, no quotes or explanations.`;
-    
-    logLlmDiagnostics("getLLMQueryMutation", prompt);
+  const prompt = `You are a deep research assistant. The initial query "${query}" yielded these snippets:\n${topSnippets.slice(0, 3).join("\n")}\n\nGenerate ONE highly specific, alternative search query to find missing technical details or counter-arguments. Return ONLY the raw query string, no quotes or explanations.`;
 
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal,
-      body: JSON.stringify({
-        model: "local-model",
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.7,
-        max_tokens: 40,
-      }),
-    });
+  logLlmDiagnostics("getLLMQueryMutation", prompt);
 
-    if (!res.ok) return null;
-    const data = await res.json();
-    const mutated = data.choices?.[0]?.message?.content?.trim();
-    return mutated ? mutated.replace(/^[\"']|[\"']$/g, "") : null;
-  } catch {
-    return null;
-  }
+  if (signal.aborted) return null;
+  const mutated = await askLoadedModel(prompt, {
+    maxTokens: 40,
+    temperature: 0.7,
+    timeoutMs: 15_000,
+    signal,
+  });
+  return mutated ? mutated.replace(/^["']|["']$/g, "") : null;
 }
 
 async function fetchWithWaybackFallback(
   url: string,
   signal: AbortSignal,
-  task: SwarmTask // <-- We add task here to grab the config!
+  task: SwarmTask,
 ): Promise<Awaited<ReturnType<typeof fetchPage>>> {
   try {
-    // TIER A: Standard Fetch (Tries normally first)
+    // TIER 1: Standard Fetch (keeps raw PDF buffer support)
     return await fetchPage(url, signal);
   } catch (err: any) {
     if (isAbortError(err)) throw err;
 
-    // TIER B: FlareSolverr (Optional Power-User Bypass)
-    const fsUrl = (task as any).flaresolverrUrl as string | undefined;
-    if (fsUrl && fsUrl.trim() !== "") {
-      try {
-        const fsRes = await fetch(fsUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ cmd: "request.get", url: url, maxTimeout: 15000 }),
-          signal
-        });
-        const fsData = await fsRes.json();
-        if (fsData?.solution?.response) {
-          return {
-            html: fsData.solution.response,
-            finalUrl: url,
-            contentType: "text/html",
-            rawBuffer: undefined // FlareSolverr only returns HTML, not raw PDFs
-          };
-        }
-      } catch (fsErr) {
-        // Silently fail and drop down to Wayback Machine
-      }
-    }
-
-    // TIER C: Wayback Machine Archive
+    // TIER 2: Multi-tier waterfall (got-scraping -> FlareSolverr -> Wayback Machine)
     try {
-      const api = `https://archive.org/wayback/available?url=${encodeURIComponent(url)}`;
-      const apiRes = await fetch(api, { signal });
-      if (!apiRes.ok) throw new Error("Wayback API failed");
-      const data = await apiRes.json();
-      const wbUrl = data?.archived_snapshots?.closest?.url;
-      if (wbUrl) {
-        return await fetchPage(wbUrl, signal);
+      const html = await fetchWithWaterfall(url, signal, task.flaresolverrUrl);
+      if (html) {
+        return {
+          html,
+          finalUrl: url,
+          contentType: "text/html",
+          rawBuffer: undefined, // Waterfall returns HTML only, not raw PDFs
+        };
       }
-    } catch {
-      // ignore
+    } catch (waterfallErr: unknown) {
+      if (isAbortError(waterfallErr)) throw waterfallErr;
     }
     throw err;
   }

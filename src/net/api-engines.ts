@@ -1,8 +1,14 @@
 import { SearchHit } from "../types";
 import { buildBrowserHeaders, sleep } from "./http";
 import { DdgRateLimiter } from "./ddg";
+import { loadUserKeys } from "../config/keys";
 
 const X_DELAY_MS = 8000;
+
+function crossrefUserAgent(): string {
+  const mailto = loadUserKeys().crossrefMailto || "deepswarm-research@localhost.invalid";
+  return `DeepSwarmResearch/5.2.1 (mailto:${mailto})`;
+}
 
 // --- SERPER API (Google) ---
 export async function searchSerper(
@@ -123,7 +129,7 @@ export async function searchCrossref(
     const res = await fetch(url, {
       signal,
       headers: {
-        "User-Agent": "DeepSwarmResearch/5.2.1 (mailto:test@test.com)",
+        "User-Agent": crossrefUserAgent(),
       },
     });
     if (!res.ok) {
