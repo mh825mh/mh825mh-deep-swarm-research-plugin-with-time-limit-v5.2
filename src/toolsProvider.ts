@@ -53,7 +53,6 @@ function readConfig(ctl: any) {
     enableAcademicAPIs: false,
 	enableYouTube: false,
     enableReferenceSearch: true,
-    enableXSearch: false,
     enableLocalSources: false,                // NEW
     serperApiKey: undefined as string | undefined,
     braveApiKey: undefined as string | undefined,
@@ -65,6 +64,8 @@ function readConfig(ctl: any) {
     llmCallMode: "standard",
     flaresolverrUrl: "",
     crossrefMailto: "",
+    rssFeedUrls: [] as string[],
+    telegramChannels: [] as string[],
       };
 
   try {
@@ -162,6 +163,9 @@ function readConfig(ctl: any) {
           : "",
 
       crossrefMailto: fileKeys.crossrefMailto || "",
+
+      rssFeedUrls: list(cfg.rssFeedUrls).length > 0 ? list(cfg.rssFeedUrls) : fileKeys.rssFeedUrls || [],
+      telegramChannels: list(cfg.telegramChannels).length > 0 ? list(cfg.telegramChannels) : fileKeys.telegramChannels || [],
     };
   } catch {
     return fallback;
@@ -240,6 +244,8 @@ const result = await runDeepResearch(
     llmCallMode: ui.llmCallMode,
     flaresolverrUrl: ui.flaresolverrUrl,
     crossrefMailto: ui.crossrefMailto,
+    rssFeedUrls: ui.rssFeedUrls,
+    telegramChannels: ui.telegramChannels,
 
     maxSessionMs:
       typeof args.sessionTimeoutMinutes === "number"

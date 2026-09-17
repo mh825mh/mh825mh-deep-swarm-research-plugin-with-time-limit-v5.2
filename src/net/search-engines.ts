@@ -2,6 +2,8 @@
 import type { SearchHit } from "../types";
 import { DdgRateLimiter, searchDDG } from "./ddg";
 import { fetchPage } from "./http";
+import { searchRssFeeds } from "./rss-engine";
+import { searchTelegram } from "./social-engines";
 import {
   searchArxiv,
   searchBraveApi,
@@ -27,11 +29,15 @@ export type SearchEngine =
   | "arxiv"
   | "gdelt"
   | "reference"
-  | "youtube";
+  | "youtube"
+  | "rss"
+  | "telegram";
 
 export interface SearchEngineOptions {
   readonly serperApiKey?: string;
   readonly braveApiKey?: string;
+  readonly rssFeedUrls?: ReadonlyArray<string>;
+  readonly telegramChannels?: ReadonlyArray<string>;
 }
 
 export type LimiterFactory = () => DdgRateLimiter;
@@ -227,6 +233,14 @@ export async function multiEngineSearch(
           case "crossref": return searchCrossref(query, perEngineLimit, signal);
           case "arxiv": return searchArxiv(query, perEngineLimit, signal);
           case "gdelt": return searchGdelt(query, perEngineLimit, signal);
+          case "rss":
+            return options.rssFeedUrls && options.rssFeedUrls.length > 0
+              ? searchRssFeeds([...options.rssFeedUrls], query, perEngineLimit, signal)
+              : [];
+          case "telegram":
+            return options.telegramChannels && options.telegramChannels.length > 0
+              ? searchTelegram([...options.telegramChannels], query, perEngineLimit, signal)
+              : [];
           case "reference": return searchReferenceSites(query, perEngineLimit, signal);
           default: return [];
         }

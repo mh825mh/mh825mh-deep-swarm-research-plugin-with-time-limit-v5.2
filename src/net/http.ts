@@ -2,6 +2,8 @@
 import * as https from "node:https";
 import * as http from "node:http";
 import { setServers } from "node:dns";
+import { isPrivateUrl, isRiskyUrl } from "./ssrf";
+import { createArchiveController } from "./archiver";
 
 const DNS_RESOLVERS = ["1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9"];
 setServers(DNS_RESOLVERS);
@@ -15,24 +17,6 @@ const UA_POOL: ReadonlyArray<string> = [
 
 function randomUA(): string {
   return UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
-}
-
-// SSRF Guard: Block internal/local IPs
-function isPrivateUrl(url: string): boolean {
-  try {
-    const u = new URL(url);
-    const host = u.hostname;
-    if (host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0") return true;
-    if (host.startsWith("10.") || host.startsWith("192.168.")) return true;
-    if (host.startsWith("172.")) {
-      const parts = host.split(".");
-      const second = parseInt(parts[1], 10);
-      if (second >= 16 && second <= 31) return true;
-    }
-    return false;
-  } catch {
-    return true;
-  }
 }
 
 export function buildBrowserHeaders(url?: string): Record<string, string> {
@@ -91,6 +75,9 @@ export async function fetchPage(
   options: FetchOptions = {}
 ): Promise<FetchResult> {
   if (isPrivateUrl(url)) throw new Error("SSRF Guard: Blocked internal URL");
+  if (await isRiskyUrl(url)) {
+    throw new Error("SSRF Guard: Blocked hostname resolving to internal/private addresses");
+  }
 
   let lastError: unknown;
   const { method = 'GET', body, headers: customHeaders = {} } = options;
@@ -152,18 +139,13 @@ export async function fetchPage(
 }
 
 async function fetchFromArchives(url: string, signal: AbortSignal): Promise<FetchResult> {
-  const encoded = encodeURIComponent(url);
+  // Only resilient, maintained archives. Dead mirrors (Google webcache,
+  // cc.bingj, freezedry, corsproxy.io, allorigins, cors-anywhere herokuapp)
+  // were removed - they return errors or are security liabilities.
   const archives = [
     `https://web.archive.org/web/2/${url}`,
-    `https://webcache.googleusercontent.com/search?q=cache:${encoded}&strip=1`,
     `https://archive.today/newest/${url}`,
-    `https://cc.bingj.com/cache.aspx?q=${url}`,
-    `https://webcache.googleusercontent.com/search?q=cache:${url}`,
-    `http://web.archive.org/web/2024/${url}`,
-    `https://freezedry.com/${url}`,
-    `https://corsproxy.io/?${encoded}`,
-    `https://api.allorigins.win/raw?url=${encoded}`,
-    `https://cors-anywhere.herokuapp.com/${url}`
+    `https://web.archive.org/web/2024/${url}`
   ];
 
   for (const cacheUrl of archives) {
@@ -186,7 +168,42 @@ async function fetchFromArchives(url: string, signal: AbortSignal): Promise<Fetc
     } catch {}
   }
 
-  throw new Error(`Failed to fetch ${url}: Blocked and all archives failed`);
+  const finalError = `Failed to fetch ${url}: Blocked and all archives failed`;
+  maybeArchivePage(url, "All fetch + archive tiers failed", signal, finalError);
+  throw new Error(finalError);
+}
+
+/**
+ * Module-level archive controller used by the research pipeline. Runs should
+ * call `resetArchiveSession()` once at the start so dedup + per-run caps are
+ * fresh; callers may also reach underneath via `getArchiveState()` for
+ * direct, fire-and-forget submissions (e.g. failing archive reads).
+ */
+const archiveController = createArchiveController();
+
+export function resetArchiveSession(): void {
+  archiveController.reset();
+}
+
+export function getArchiveState(): {
+  readonly submitted: number;
+  readonly skipped: number;
+  readonly failed: number;
+} {
+  return archiveController.stats();
+}
+
+export function maybeArchivePage(
+  url: string,
+  reason: string,
+  signal: AbortSignal,
+  lastError?: string,
+): void {
+  archiveController
+    .submit(url, reason, signal, lastError)
+    .catch(() => {
+      // Fire-and-forget: never let archiving break the research run.
+    });
 }
 
 export function safeHostname(url: string): string {

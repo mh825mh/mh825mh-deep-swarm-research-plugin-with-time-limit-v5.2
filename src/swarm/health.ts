@@ -36,6 +36,8 @@ export class SearchHealthTracker {
   public localChunksRetrieved: number = 0;
   public localChunksAccepted: number = 0;
   public junkUrlsRejected: number = 0;
+  public pagesArchived: number = 0;
+  public archiveSubmitFailures: number = 0;
 
   private freshState(): EngineHealth {
     return {
@@ -129,6 +131,10 @@ API GAP FILLING
 QUERY QUALITY
 - Gaps generated: ${this.gaps.length}
 - Invalid gaps rejected: ${this.gaps.filter(g => !g.missingClaim).length}
+
+ARCHIVE-ON-FAILURE
+- Pages archived to Wayback: ${this.pagesArchived}
+- Archive submission failures/skips: ${this.archiveSubmitFailures}
 ══════════════════════════════════════════════════════════════
 `;
   }

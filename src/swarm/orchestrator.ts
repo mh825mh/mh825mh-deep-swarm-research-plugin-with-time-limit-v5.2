@@ -20,10 +20,11 @@ import {
 } from "../types";
 import { DepthProfile } from "../constants";
 import { DdgLimiterPool, resetThrottle } from "../net/ddg";
+import { resetArchiveSession, getArchiveState } from "../net/http";
 import { VisitedPageCache, normalizeUrl } from "./visited-cache";
 import { log } from "./logger";
 import { detectContradictions } from "../synthesis/ai";
-import { SearchHealthTracker } from "./health";
+import { SearchHealthTracker, EngineState } from "./health";
 import { LlmCallManager } from "../utils/llm";
 import fs from "node:fs";
 import path from "node:path";
@@ -179,6 +180,8 @@ function getEnginesForRole(
   if (cfg.enableReferenceSearch) freeEngines.push("reference");
   if (cfg.enableAcademicAPIs) freeEngines.push("openalex", "crossref", "arxiv");
   if (cfg.enableYouTube) freeEngines.push("youtube");
+  if (cfg.rssFeedUrls && cfg.rssFeedUrls.length > 0) freeEngines.push("rss");
+  if (cfg.telegramChannels && cfg.telegramChannels.length > 0) freeEngines.push("telegram");
   freeEngines.push("gdelt");
 
   if (mode === "benchmark") {
@@ -232,6 +235,8 @@ function buildTaskBase(
   | "braveApiKey"
   | "enableYouTube"
   | "flaresolverrUrl"
+  | "rssFeedUrls"
+  | "telegramChannels"
 > {
   return {
     contentLimit: cfg.contentLimitPerPage,
@@ -256,6 +261,8 @@ function buildTaskBase(
     braveApiKey: cfg.braveApiKey,
     enableYouTube: cfg.enableYouTube,
     flaresolverrUrl: cfg.flaresolverrUrl,
+    rssFeedUrls: cfg.rssFeedUrls,
+    telegramChannels: cfg.telegramChannels,
   };
 }
 
@@ -411,6 +418,19 @@ export interface OrchestratorResult {
   readonly workerErrors: ReadonlyArray<string>;
   readonly usedAI: boolean;
   readonly topicKeywords: ReadonlyArray<string>;
+  readonly runStats?: {
+    readonly ddgState: EngineState;
+    readonly ddgQueries: number;
+    readonly ddgBlocks: number;
+    readonly pagesArchived: number;
+    readonly archiveSubmitFailures: number;
+    readonly llmCallsUsed: number;
+    readonly llmCallBudget: number;
+    readonly runtimeElapsedMs: number;
+    readonly cacheEntries: number;
+    readonly cacheFile: string;
+    readonly cacheMaxAgeDays: number;
+  };
 }
 
 export interface SharedCrawlState {
@@ -456,6 +476,8 @@ export async function runSwarm(
   
   const health = new SearchHealthTracker();
   const llmManager = new LlmCallManager(cfg.llmCallMode ?? "standard", cfg.contextIsolation ?? "strict");
+  resetArchiveSession();
+  const runStartedAt = Date.now();
 
   fileStatus(`\n🚀 DEEP RESEARCH SWARM LAUNCHED (Strict Priority Mode)\n`);
   fileStatus(`[RUN CONTROL] Budget: ${llmManager.budget.maxGlobalCalls} calls | Timeout: ${llmManager.budget.maxRuntimeMs / 60000}m | Isolation: ${llmManager.isolationMode}`);
@@ -629,6 +651,30 @@ export async function runSwarm(
     workerErrors: allErrors,
     usedAI: plan.usedAI,
     topicKeywords: plan.topicKeywords,
+    runStats: buildRunStats(health, llmManager, state, runStartedAt),
+  };
+}
+
+function buildRunStats(
+  health: SearchHealthTracker,
+  llmManager: LlmCallManager,
+  state: SharedCrawlState,
+  runStartedAt: number,
+): NonNullable<OrchestratorResult["runStats"]> {
+  const archive = getArchiveState();
+  const cache = state.cacheStats();
+  return {
+    ddgState: health.ddg.state,
+    ddgQueries: health.ddg.searchesAttempted,
+    ddgBlocks: health.ddg.blocks,
+    pagesArchived: archive.submitted,
+    archiveSubmitFailures: archive.failed + archive.skipped,
+    llmCallsUsed: llmManager.watchdog.llmCallsMade,
+    llmCallBudget: llmManager.budget.maxGlobalCalls,
+    runtimeElapsedMs: Date.now() - runStartedAt,
+    cacheEntries: cache.entries,
+    cacheFile: cache.file,
+    cacheMaxAgeDays: cache.maxAgeDays,
   };
 }
 

@@ -142,6 +142,8 @@ export interface SwarmTask {
   readonly serperApiKey?: string;
   readonly braveApiKey?: string;
   readonly flaresolverrUrl?: string;
+  readonly rssFeedUrls?: ReadonlyArray<string>;
+  readonly telegramChannels?: ReadonlyArray<string>;
 }
 
 
@@ -285,12 +287,13 @@ export interface ResearchConfig {
   readonly cacheDuration?: string;
   readonly flaresolverrUrl?: string;
   readonly crossrefMailto?: string;
-  readonly enableXSearch?: boolean;
   readonly enableYouTube?: boolean;
   readonly enableAcademicAPIs?: boolean;
   readonly enableReferenceSearch?: boolean;
   readonly serperApiKey?: string;
   readonly braveApiKey?: string;
+  readonly rssFeedUrls?: ReadonlyArray<string>;
+  readonly telegramChannels?: ReadonlyArray<string>;
 }
 
 export interface ResearchResult {

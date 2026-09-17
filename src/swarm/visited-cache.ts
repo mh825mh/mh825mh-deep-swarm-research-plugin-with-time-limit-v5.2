@@ -63,15 +63,14 @@ export class VisitedPageCache {
   };
   private saveTimeout: NodeJS.Timeout | null = null;
 
-  // Change the parameter to expect months, defaulting to 24
-  constructor(maxAgeMonths: number = 24, filePath: string = CACHE_FILE) {
-    // Convert months to days (approx 30 days per month)
-    this.maxAgeDays = Math.max(1, Math.floor(maxAgeMonths * 30));
+  // The UI "Cache Duration" is expressed in days; use it directly.
+  constructor(maxAgeDays: number = 30, filePath: string = CACHE_FILE) {
+    this.maxAgeDays = Math.max(1, Math.floor(maxAgeDays));
     this.filePath = filePath;
     this.load();
     this.prune();
     
-    console.log(`[CACHE] Initialized with max_age_days=${this.maxAgeDays} (${maxAgeMonths} months)`);
+    console.log(`[CACHE] Initialized with max_age_days=${this.maxAgeDays} (${maxAgeDays} days)`);
   }
 
   hasRecent(url: string): boolean {

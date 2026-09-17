@@ -1,7 +1,8 @@
 {
-  "serperApiKey": "your-serper-key",
-  "braveApiKey": "your-brave-key",
-  "xAuthTokens": "auth_token=xxx; ct0=yyy",
-  "rssFeedUrls": ["https://feeds.bbci.co.uk/news/rss.xml"],
-  "telegramChannels": ["channelname"]
+  "_comment": "Template only. Real keys are loaded from ~/.deep-swarm-research/api-keys.json (see plugin README); this file ships with the plugin so dist archives always contain a valid placeholder.",
+  "serperApiKey": "",
+  "braveApiKey": "",
+  "crossrefMailto": "",
+  "rssFeedUrls": [],
+  "telegramChannels": []
 }

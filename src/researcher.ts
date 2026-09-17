@@ -67,10 +67,48 @@ export async function runDeepResearch(
     `Report ready - ${swarmResult.sources.length} sources, ${swarmResult.queriesUsed.length} queries`,
   );
 
+  const footer = buildRunFooter(swarmResult.runStats, swarmResult.workerErrors.length, swarmResult.sources.length, swarmResult.queriesUsed.length);
+  const finalMarkdown = footer
+    ? `${report.markdown.trim()}\n\n${footer}`
+    : report.markdown;
+
   return {
-    report,
+    report: { ...report, markdown: finalMarkdown },
     queriesUsed: swarmResult.queriesUsed,
     totalSources: swarmResult.sources.length,
     totalRounds: profile.depthRounds,
   };
+}
+
+function buildRunFooter(
+  stats: Readonly<NonNullable<import("./swarm/orchestrator").OrchestratorResult["runStats"]>> | undefined,
+  workerErrorCount: number,
+  sourceCount: number,
+  queryCount: number,
+): string {
+  if (!stats) return "";
+  const elapsedMin = Math.round(stats.runtimeElapsedMs / 60000);
+  const lines: string[] = [
+    "---",
+    "## 🔍 Query Log",
+    `Sources collected: ${sourceCount}`,
+    `Queries run: ${queryCount}`,
+    `Worker errors: ${workerErrorCount}`,
+    "",
+    "## 🚦 Source Health",
+    `DDG state: ${stats.ddgState}`,
+    `DDG searches attempted: ${stats.ddgQueries}`,
+    `DDG blocks/challenges: ${stats.ddgBlocks}`,
+    "",
+    "## 🤖 LLM Watchdog",
+    `LLM calls used: ${stats.llmCallsUsed} / ${stats.llmCallBudget}`,
+    `Runtime: ${elapsedMin} min`,
+    "",
+    "## 💾 Cache & Archives",
+    `Visited cache entries: ${stats.cacheEntries} (max age ${stats.cacheMaxAgeDays} days)`,
+    `Cache file: ${stats.cacheFile}`,
+    `Pages archived to Wayback: ${stats.pagesArchived}`,
+    `Archive submission failures: ${stats.archiveSubmitFailures}`,
+  ];
+  return lines.join("\n");
 }

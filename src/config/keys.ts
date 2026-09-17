@@ -10,6 +10,8 @@ export interface UserKeys {
   readonly serperApiKey?: string;
   readonly braveApiKey?: string;
   readonly crossrefMailto?: string;
+  readonly rssFeedUrls?: ReadonlyArray<string>;
+  readonly telegramChannels?: ReadonlyArray<string>;
 }
 
 function ensureTemplate(): void {
@@ -23,6 +25,8 @@ function ensureTemplate(): void {
           serperApiKey: "",
           braveApiKey: "",
           crossrefMailto: "",
+          rssFeedUrls: [],
+          telegramChannels: [],
         },
         null,
         2,
@@ -45,11 +49,22 @@ export function loadUserKeys(): UserKeys {
 
     const cleanStr = (v: unknown): string | undefined =>
       typeof v === "string" && v.trim() ? v.trim() : undefined;
+    const cleanArr = (v: unknown): ReadonlyArray<string> | undefined => {
+      if (!Array.isArray(v)) return undefined;
+      const out: string[] = [];
+      for (const item of v) {
+        const s = cleanStr(item);
+        if (s && !out.includes(s)) out.push(s);
+      }
+      return out.length > 0 ? out : undefined;
+    };
 
     return {
       serperApiKey: cleanStr(parsed.serperApiKey),
       braveApiKey: cleanStr(parsed.braveApiKey),
       crossrefMailto: cleanStr(parsed.crossrefMailto),
+      rssFeedUrls: cleanArr(parsed.rssFeedUrls),
+      telegramChannels: cleanArr(parsed.telegramChannels),
     };
   } catch (err) {
     console.error(

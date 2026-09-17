@@ -20,7 +20,7 @@ import {
 } from "../net/ddg";
 import { multiEngineSearch, SearchEngine } from "../net/search-engines";
 import { SearchHealthTracker } from "./health";
-import { fetchPage, sleep } from "../net/http";
+import { fetchPage, sleep, maybeArchivePage } from "../net/http";
 import {
   extractPage,
   contentFingerprint,
@@ -326,7 +326,7 @@ export async function runWorker(
           query, Math.min(task.searchResultsPerQuery, 8),
           task.extraEngines as ReadonlyArray<SearchEngine>,
           signal, () => limiter, task.timeRange ?? "all",
-          { serperApiKey: (task as any).serperApiKey, braveApiKey: (task as any).braveApiKey }
+          { serperApiKey: (task as any).serperApiKey, braveApiKey: (task as any).braveApiKey, rssFeedUrls: (task as any).rssFeedUrls, telegramChannels: (task as any).telegramChannels }
         );
         metrics.extraEngineHits += extraHits.length;
         for (const h of extraHits) allHits.push({ ...h, query });
@@ -675,6 +675,7 @@ async function fetchWithWaybackFallback(
     } catch (waterfallErr: unknown) {
       if (isAbortError(waterfallErr)) throw waterfallErr;
     }
+    maybeArchivePage(url, "Fetch + waterfall both failed; preserving for later retrieval", signal, err?.message);
     throw err;
   }
 }
