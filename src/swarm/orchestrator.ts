@@ -190,6 +190,7 @@ function getEnginesForRole(
 
   const roleEngines: string[] = [];
   if (cfg.enableReferenceSearch && (role === "breadth" || role === "academic")) roleEngines.push("reference");
+  if (cfg.enableYouTube && (role === "breadth" || role === "academic")) roleEngines.push("youtube");
   if (cfg.enableAcademicAPIs && (role === "academic" || role === "technical")) roleEngines.push("openalex", "crossref", "arxiv");
   if (role === "recency" || role === "critical") roleEngines.push("gdelt");
 

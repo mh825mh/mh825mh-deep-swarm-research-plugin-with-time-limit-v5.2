@@ -274,7 +274,7 @@ export async function searchReferenceSites(
   // 1. Grokipedia
   try {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-    const url = `https://grokipedia.com/search?query=${encodeURIComponent(query)}`;
+    const url = `https://grokipedia.com/search?q=${encodeURIComponent(query)}`;
     const res = await fetch(url, {
       signal,
       headers: buildBrowserHeaders(url),
@@ -282,8 +282,26 @@ export async function searchReferenceSites(
     if (res.ok) {
       const html = await res.text();
       const linkRe =
-        /<a[^>]+href="(https:\/\/grokipedia\.com\/wiki\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-      scrapeLinks(html, linkRe, "grokipedia", maxResults, hits, seen);
+        /<a[^>]+href="\/(?:page|wiki)\/([^"#?]+)"[^>]*data-search-snippet="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+      let m: RegExpExecArray | null;
+      while (hits.length < maxResults && (m = linkRe.exec(html)) !== null) {
+        const slug = m[1];
+        if (!slug) continue;
+        const canonical = `https://grokipedia.com/page/${slug}`;
+        if (seen.has(canonical)) continue;
+        seen.add(canonical);
+        const inner = m[3] ?? "";
+        const titleSpan =
+          inner.match(
+            /<span[^>]*class="[^"]*(?:truncate|font-medium)[^"]*"[^>]*>([\s\S]*?)<\/span>/i,
+          )?.[1] ?? "";
+        hits.push({
+          url: canonical,
+          title: (titleSpan || inner).replace(/<[^>]+>/g, "").trim(),
+          snippet: (m[2] ?? "").trim(),
+          discoveredBy: "grokipedia",
+        });
+      }
     }
   } catch {}
 

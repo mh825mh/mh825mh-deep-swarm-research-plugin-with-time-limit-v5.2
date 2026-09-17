@@ -49,6 +49,8 @@ const DOMAIN_DB: Readonly<Record<string, DomainEntry>> = {
   "epa.gov": [88, "government"],
 
   "wikipedia.org": [80, "reference"],
+  "grokipedia.com": [84, "reference"],
+  "encyclopedia.com": [80, "reference"],
   "britannica.com": [85, "reference"],
   "merriam-webster.com": [83, "reference"],
   "investopedia.com": [74, "reference"],

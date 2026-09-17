@@ -1,5 +1,15 @@
 import { buildBrowserHeaders } from "./http";
 
+const INNERTUBE_PLAYER_URL = "https://www.youtube.com/youtubei/v1/player";
+const ANDROID_CLIENT = {
+  client: {
+    clientName: "ANDROID",
+    clientVersion: "20.10.38",
+    hl: "en",
+    gl: "US",
+  },
+};
+
 function extractVideoId(url: string): string | null {
   try {
     const u = new URL(url);
@@ -13,6 +23,81 @@ function extractVideoId(url: string): string | null {
   }
 }
 
+async function fetchInnerTube(
+  videoId: string,
+  signal: AbortSignal,
+): Promise<Record<string, any> | null> {
+  // Fetch the watch page to extract the INNERTUBE API key. YouTube gates the
+  // legacy "captionTracks" blob on the page, but a fresh innerTube player POST
+  // (ANDROID client) returns working timedtext URLs.
+  const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const pageRes = await fetch(watchUrl, {
+    signal,
+    headers: buildBrowserHeaders(watchUrl),
+  });
+  if (!pageRes.ok) return null;
+  const html = await pageRes.text();
+
+  const keyMatch = html.match(/"INNERTUBE_API_KEY":"([^"]+)"/);
+  const apiKey = keyMatch ? keyMatch[1] : undefined;
+  if (!apiKey) return null;
+
+  const res = await fetch(`${INNERTUBE_PLAYER_URL}?key=${encodeURIComponent(apiKey)}`, {
+    method: "POST",
+    signal,
+    headers: {
+      "Content-Type": "application/json",
+      ...buildBrowserHeaders(INNERTUBE_PLAYER_URL),
+    },
+    body: JSON.stringify({ context: ANDROID_CLIENT, videoId }),
+  });
+  if (!res.ok) return null;
+  return (await res.json()) as Record<string, any>;
+}
+
+function pickTrack(tracks: any[]): any | null {
+  if (!Array.isArray(tracks) || tracks.length === 0) return null;
+  const manual = tracks.filter((t) => !t.kind || t.kind !== "asr");
+  const pool = manual.length > 0 ? manual : tracks;
+  return (
+    pool.find((t) => t.languageCode === "en") ??
+    pool.find((t) => t.languageCode === "en-US") ??
+    pool[0] ??
+    null
+  );
+}
+
+function parseTranscriptXml(
+  xml: string,
+  maxChars: number,
+): { text: string; totalChars: number } | null {
+  const segments: string[] = [];
+  const regex = /<text start="([\d.]+)" dur="[\d.]+">([\s\S]*?)<\/text>/g;
+  let match: RegExpExecArray | null;
+  let totalChars = 0;
+
+  while ((match = regex.exec(xml)) !== null) {
+    const startSec = parseFloat(match[1]);
+    const mins = Math.floor(startSec / 60).toString().padStart(2, "0");
+    const secs = Math.floor(startSec % 60).toString().padStart(2, "0");
+    const text = match[2]
+      .replace(/&amp;/g, "&")
+      .replace(/&#39;/g, "'")
+      .replace(/&quot;/g, '"')
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/\n/g, " ")
+      .trim();
+
+    const line = `[${mins}:${secs}] ${text}`;
+    if (totalChars + line.length > maxChars) break;
+    segments.push(line);
+    totalChars += line.length;
+  }
+
+  return segments.length > 0 ? { text: segments.join("\n"), totalChars } : null;
+}
+
 export async function extractYouTubeTranscript(
   url: string,
   signal: AbortSignal,
@@ -22,86 +107,52 @@ export async function extractYouTubeTranscript(
   if (!videoId) return null;
 
   try {
-    // 1. Fetch the video page to get metadata and captions URL
-    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    const res = await fetch(videoUrl, { signal, headers: buildBrowserHeaders(videoUrl) });
-    if (!res.ok) return null;
-    const html = await res.text();
+    const data = await fetchInnerTube(videoId, signal);
+    if (!data) return null;
 
-    // 2. Extract Title
-    const titleMatch = html.match(/<title>(.*?)<\/title>/i);
-    const title = titleMatch ? titleMatch[1].replace(" - YouTube", "").trim() : url;
+    const title = data?.videoDetails?.title ?? url;
+    const description = (data?.videoDetails?.shortDescription ?? "").slice(0, 250);
 
-    // 3. Extract Description (for fallback)
-    const descMatch = html.match(/"shortDescription":"(.*?)"/);
-    const description = descMatch ? descMatch[1].replace(/\\n/g, "\n").trim() : "";
+    const fallbackText =
+      description.slice(0, maxChars) || "No transcript or description available.";
 
-    // 4. Find Caption Tracker URL
-    const captionsMatch = html.match(/"captionTracks":(\[.*?\])/);
-    if (!captionsMatch) {
-      // No captions available, return description as fallback text
+    const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    const track = pickTrack(tracks);
+    if (!track?.baseUrl) {
       return {
-        text: description.slice(0, maxChars) || "No transcript or description available.",
+        text: fallbackText,
         title,
-        description: description.slice(0, 250),
+        description,
       };
     }
 
-    let captionTracks: any[] = [];
-    try {
-      // Safely parse the JSON array
-      const jsonStr = captionsMatch[1].replace(/\\u0026/g, "&").replace(/\\"/g, '"');
-      captionTracks = JSON.parse(jsonStr);
-    } catch {
-      return null;
+    // YouTube adds &exp=xpe (proof-of-origin gating) to timedtext URLs it
+    // refuses to serve anonymously; treat those like "no captions available".
+    const baseUrl = String(track.baseUrl).replace("&fmt=srv3", "");
+    if (baseUrl.includes("exp=xpe")) {
+      return { text: fallbackText, title, description };
     }
 
-    if (captionTracks.length === 0) {
-      return { text: description.slice(0, maxChars) || "No transcript available.", title, description: description.slice(0, 250) };
-    }
-
-    // Prefer English captions
-    const track = captionTracks.find(t => t.languageCode === "en") ?? captionTracks[0];
-    const captionUrl = track.baseUrl;
-    if (!captionUrl) return null;
-
-    // 5. Fetch and Parse Transcript XML
-    const capRes = await fetch(captionUrl, { signal, headers: buildBrowserHeaders(captionUrl) });
+    const capRes = await fetch(baseUrl, {
+      signal,
+      headers: buildBrowserHeaders(baseUrl),
+    });
     if (!capRes.ok) return null;
     const xml = await capRes.text();
 
-    const segments: string[] = [];
-    const regex = /<text start="([\d.]+)" dur="[\d.]+">([\s\S]*?)<\/text>/g;
-    let match: RegExpExecArray | null;
-    let totalChars = 0;
-
-    while ((match = regex.exec(xml)) !== null) {
-      const startSec = parseFloat(match[1]);
-      const mins = Math.floor(startSec / 60).toString().padStart(2, "0");
-      const secs = Math.floor(startSec % 60).toString().padStart(2, "0");
-      const text = match[2]
-        .replace(/&amp;/g, "&")
-        .replace(/&#39;/g, "'")
-        .replace(/&quot;/g, '"')
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/\n/g, " ")
-        .trim();
-
-      const line = `[${mins}:${secs}] ${text}`;
-      if (totalChars + line.length > maxChars) break;
-      segments.push(line);
-      totalChars += line.length;
-    }
-
-    if (segments.length === 0) {
-      return { text: description.slice(0, maxChars) || "Failed to parse transcript.", title, description: description.slice(0, 250) };
+    const parsed = parseTranscriptXml(xml, maxChars);
+    if (!parsed) {
+      return {
+        text: description.slice(0, maxChars) || "Failed to parse transcript.",
+        title,
+        description,
+      };
     }
 
     return {
-      text: segments.join("\n"),
+      text: parsed.text,
       title,
-      description: description.slice(0, 250),
+      description,
     };
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") throw err;

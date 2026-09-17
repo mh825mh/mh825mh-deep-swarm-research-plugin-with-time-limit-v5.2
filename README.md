@@ -1,8 +1,14 @@
-# 🐝 Deep Research w/ Swarm Agent (v5.3.5)
+# 🐝 Deep Research w/ Swarm Agent (v5.3.6)
 
 
 
 Autonomous deep research for LM Studio. A swarm of specialized AI workers searches your local documents and the web, dynamically adapting its strategy, verifying claims, and synthesizing everything into a structured, confidence-scored report with auditable citations—all in one tool call.
+
+## 🚀 What's New in v5.3.6?
+
+* **Grokipedia search fixed:** was returning zero results — the plugin used the wrong query param (`?query=` vs the site's `?q=`) and the wrong link selector (`/wiki/` vs the site's actual `/page/<slug>` paths). It now canonicalizes `/page/` links, pulls real snippets, and is properly scored as a reference domain.
+* **YouTube transcripts now actually fetch:** YouTube began returning empty caption bodies to anonymous requests, so transcript extraction silently degraded to video descriptions. The extractor now reads `ytInitialPlayerResponse`, extracts the INNERTUBE API key, and calls the `youtubei/v1/player` endpoint (ANDROID client) to obtain a working timedtext URL, with graceful fallback when YouTube requires a proof-of-origin token (`exp=xpe`).
+* **YouTube engine reachable in adaptive mode:** `enableYouTube` previously only added the `youtube` engine in benchmark mode; it now also joins `breadth`/`academic` roles in adaptive runs, so transcript sources actually surface.
 
 ## 🚀 What's New in v5.3.5?
 
