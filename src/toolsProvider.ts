@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 
-import { multiEngineSearch } from "./net/search-engines";
+import { multiEngineSearch, type SearchEngine } from "./net/search-engines";
 import { DdgRateLimiter } from "./net/ddg";
 import { scoreCandidate, rankCandidates } from "./scoring/authority";
 import { fetchPage } from "./net/http";
@@ -43,7 +43,11 @@ function isPdfUrl(url: string): boolean {
 function readConfig(ctl: any) {
   const fallback = {
     researchDepth: "standard",
+    contentLimitMode: "auto" as "auto" | "manual",
     contentLimitPerPage: 4000,
+    searchResultsPerQuery: 0,
+    evidenceExcerptChars: 0,
+    enableAdaptiveLearning: true,
     enableLinkFollowing: true,
     enableAIPlanning: true,
     safeSearch: "moderate",
@@ -66,6 +70,7 @@ function readConfig(ctl: any) {
     crossrefMailto: "",
     rssFeedUrls: [] as string[],
     telegramChannels: [] as string[],
+    externalPluginTools: [] as string[],
       };
 
   try {
@@ -109,8 +114,20 @@ function readConfig(ctl: any) {
 
     return {
       researchDepth: cfg.researchDepth ?? fallback.researchDepth,
+      contentLimitMode:
+        cfg.contentLimitMode === "manual" ? "manual" : "auto",
       contentLimitPerPage: Number(
         cfg.contentLimitPerPage ?? fallback.contentLimitPerPage,
+      ),
+      searchResultsPerQuery: Number(
+        cfg.searchResultsPerQuery ?? fallback.searchResultsPerQuery,
+      ),
+      evidenceExcerptChars: Number(
+        cfg.evidenceExcerptChars ?? fallback.evidenceExcerptChars,
+      ),
+      enableAdaptiveLearning: on(
+        cfg.enableAdaptiveLearning,
+        fallback.enableAdaptiveLearning,
       ),
       enableLinkFollowing: on(cfg.enableLinkFollowing, fallback.enableLinkFollowing),
       enableAIPlanning: on(cfg.enableAIPlanning, fallback.enableAIPlanning),
@@ -129,6 +146,8 @@ function readConfig(ctl: any) {
 
       serperApiKey: serperKey,
       braveApiKey: braveKey,
+
+      externalPluginTools: list(cfg.externalPluginTools),
 
       cacheDuration: typeof cfg.cacheDuration === "string" && cfg.cacheDuration.trim()
         ? cfg.cacheDuration
@@ -172,6 +191,15 @@ function readConfig(ctl: any) {
   }
 }
 
+function defaultSearchEngines(cfg: ReturnType<typeof readConfig>): SearchEngine[] {
+  const engines: SearchEngine[] = ["ddg", "bing", "reference"];
+  if (cfg.enableAcademicAPIs) engines.push("openalex", "crossref", "arxiv");
+  if (cfg.enableYouTube) engines.push("youtube");
+  if (cfg.serperApiKey) engines.push("serper");
+  if (cfg.braveApiKey) engines.push("brave-api");
+  return engines;
+}
+
 export async function toolsProvider(ctl: any) {
   const deepResearchTool = tool({
     name: "DeepResearch",
@@ -189,7 +217,16 @@ export async function toolsProvider(ctl: any) {
       contentLimit: z
         .number()
         .optional()
-        .describe("Content limit per page."),
+        .describe("Content limit per page (overrides the UI setting)."),
+      maxResultsPerQuery: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .optional()
+        .describe(
+          "Results requested from each search engine per query (overrides UI setting).",
+        ),
       sessionTimeoutMinutes: z
         .number()
         .optional()
@@ -224,8 +261,16 @@ const result = await runDeepResearch(
     topic: args.topic,
     focusAreas: args.focusAreas ?? [],
     depthPreset: args.depth ?? ui.researchDepth,
+    contentLimitMode: ui.contentLimitMode as "auto" | "manual",
     contentLimitPerPage:
       args.contentLimit ?? ui.contentLimitPerPage,
+    searchResultsPerQuery:
+      typeof args.maxResultsPerQuery === "number"
+        ? args.maxResultsPerQuery
+        : ui.searchResultsPerQuery,
+    evidenceExcerptChars: ui.evidenceExcerptChars,
+    enableAdaptiveLearning: ui.enableAdaptiveLearning,
+    externalPluginTools: ui.externalPluginTools,
     enableLinkFollowing: ui.enableLinkFollowing,
     enableAIPlanning: ui.enableAIPlanning,
     safeSearch: ui.safeSearch,
@@ -297,6 +342,8 @@ const researchSearchTool = tool({
     "Search the web and return scored, ranked results with domain authority tiers. " +
     "Each result includes a domain score (0-100), source tier (academic/government/news/etc.), " +
     "URL quality score, and freshness estimate. Results are ranked by combined quality. " +
+    "By default queries several engines in parallel (DuckDuckGo, Bing, reference sites, plus " +
+    "academic APIs and YouTube when enabled in settings) and merges/deduplicates the hits. " +
     "Use this for focused lookups. For full research, use 'Research'." +
     "Don't use this for searching local files.",
   parameters: {
@@ -311,24 +358,65 @@ const researchSearchTool = tool({
       .max(SEARCH_RESULTS_MAX)
       .optional()
       .describe("Max results to return (default: 8)."),
+    engines: z
+      .array(
+        z.enum([
+          "ddg",
+          "bing",
+          "brave",
+          "reference",
+          "academic",
+          "youtube",
+          "serper",
+          "brave-api",
+        ]),
+      )
+      .optional()
+      .describe(
+        "Optional engine set to use. 'academic' expands to OpenAlex + Crossref + arXiv. " +
+        "Defaults to the configured engines (ddg, bing, reference, +academic APIs when enabled, +youtube when enabled).",
+      ),
+    timeRange: z
+      .enum(["all", "day", "week", "month", "year"])
+      .optional()
+      .describe("Recency filter passed to engines that support it (default: configured value)."),
   },
 
   implementation: async (
-    { query, maxResults },
+    { query, maxResults, engines, timeRange },
     { status, warn, signal },
   ) => {
+    const cfg = readConfig(ctl);
     const max = maxResults ?? 8;
+    const expand = (list: ReadonlyArray<string>): SearchEngine[] =>
+      list.flatMap((e): SearchEngine[] =>
+        e === "academic" ? ["openalex", "crossref", "arxiv"] : [e as SearchEngine],
+      );
+    const requested = engines && engines.length > 0 ? expand(engines) : defaultSearchEngines(cfg);
+    const usable = requested.filter((e) => {
+      if (e === "serper") return !!cfg.serperApiKey;
+      if (e === "brave-api") return !!cfg.braveApiKey;
+      return true;
+    });
+    const engineSet = usable.length > 0 ? usable : (["ddg"] as SearchEngine[]);
+    const effectiveTimeRange = timeRange ?? cfg.timeRange ?? "all";
 
-    status(`Searching: "${query}"`);
+    status(`Searching "${query}" via ${engineSet.join(", ")}`);
 
     try {
       const hits = await multiEngineSearch(
         query,
-        max,
-        ["ddg", "bing", "reference"],
+        max * Math.max(1, engineSet.length),
+        engineSet,
         signal,
         () => new DdgRateLimiter(10000),
-        "all",
+        effectiveTimeRange,
+        {
+          serperApiKey: cfg.serperApiKey,
+          braveApiKey: cfg.braveApiKey,
+          rssFeedUrls: cfg.rssFeedUrls,
+          telegramChannels: cfg.telegramChannels,
+        },
       );
 
       if (hits.length === 0) {
@@ -1436,6 +1524,100 @@ if (removed) {
     },
   });
 
+  const usePluginTool = tool({
+    name: "Use Plugin Tool",
+    description:
+      "Invoke a tool exposed by ANOTHER loaded LM Studio plugin (cross-plugin tool use). " +
+      "Call with only 'plugin' to list that plugin's available tools, or with 'toolName' " +
+      "(and optional 'input') to run one and return its result. This lets Deep Swarm pull " +
+      "evidence or capabilities from companion plugins. Requires the target plugin to be " +
+      "loaded and granted tool-use access. You can set a default plugin id in settings " +
+      "(externalPluginTools).",
+    parameters: {
+      plugin: z
+        .string()
+        .optional()
+        .describe("Target plugin identifier as 'owner/name' (or 'dev/owner/name'). Defaults to the configured external plugin."),
+      toolName: z
+        .string()
+        .optional()
+        .describe("Name of the remote tool to invoke. Omit to list the plugin's tools."),
+      input: z
+        .record(z.unknown())
+        .optional()
+        .describe("Arguments object passed to the remote tool."),
+    },
+    implementation: async ({ plugin, toolName, input }, { status, warn, signal }) => {
+      const cfg = readConfig(ctl);
+      const pluginId = (plugin && plugin.trim()) || cfg.externalPluginTools[0] || "";
+
+      if (!pluginId) {
+        return {
+          error: true,
+          output:
+            "No plugin specified and no default set. Pass 'plugin' (e.g. 'owner/name') or configure externalPluginTools in settings.",
+        } satisfies ToolCallResult;
+      }
+
+      const client = ctl?.client;
+      if (!client?.plugins?.pluginTools) {
+        return {
+          error: true,
+          output:
+            "Cross-plugin tools are unavailable: ctl.client.plugins.pluginTools not found. " +
+            "Run this inside LM Studio with a recent SDK.",
+        } satisfies ToolCallResult;
+      }
+
+      let session: any = null;
+      try {
+        status(`Opening remote plugin: ${pluginId}...`);
+        session = await client.plugins.pluginTools(pluginId, { signal });
+        const remoteTools: ReadonlyArray<any> = session?.tools ?? [];
+
+        if (!toolName) {
+          const listing = remoteTools.map((t) => ({
+            name: t.name,
+            description: t.description ?? "",
+            readOnly: t.readOnly ?? null,
+          }));
+          return {
+            error: false,
+            output: JSON.stringify({ plugin: pluginId, tools: listing }, null, 2),
+          } satisfies ToolCallResult;
+        }
+
+        const target = remoteTools.find((t) => t.name === toolName);
+        if (!target) {
+          return {
+            error: true,
+            output: `Tool '${toolName}' not found on '${pluginId}'. Available: ${
+              remoteTools.map((t) => t.name).join(", ") || "(none)"
+            }`,
+          } satisfies ToolCallResult;
+        }
+
+        status(`Invoking ${pluginId} -> ${toolName}...`);
+        const result = await target.implementation(input ?? {}, { status, warn, signal });
+        const output =
+          typeof result === "string" ? result : JSON.stringify(result, null, 2);
+        return { error: false, output } satisfies ToolCallResult;
+      } catch (err: unknown) {
+        return {
+          error: true,
+          output: `Cross-plugin call to '${pluginId}' failed: ${errorMessage(err)}`,
+        } satisfies ToolCallResult;
+      } finally {
+        try {
+          if (session && typeof session[Symbol.dispose] === "function") session[Symbol.dispose]();
+          else if (session && typeof session.dispose === "function") await session.dispose();
+        } catch {
+          /* ignore dispose errors */
+        }
+      }
+    },
+  });
+
     return [
     deepResearchTool,
     researchSearchTool,
@@ -1443,6 +1625,7 @@ if (removed) {
     researchMultiReadTool,
     pdfBatchReadTool,
     readSkillFileTool,
+    usePluginTool,
     ragAddLibraryTool,
     ragListLibrariesTool,
     ragRemoveLibraryTool,

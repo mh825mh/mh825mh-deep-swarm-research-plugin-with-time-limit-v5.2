@@ -1,8 +1,18 @@
-# 🐝 Deep Research w/ Swarm Agent (v5.3.7)
+# 🐝 Deep Research w/ Swarm Agent (v5.4.0)
 
 
 
 Autonomous deep research for LM Studio. A swarm of specialized AI workers searches your local documents and the web, dynamically adapting its strategy, verifying claims, and synthesizing everything into a structured, confidence-scored report with auditable citations—all in one tool call.
+
+## 🚀 What's New in v5.4.0?
+
+* **More results per query:** fixed the volume bug where `multiEngineSearch` divided the requested result count across engines, so 3 engines returned ~3 hits each instead of the full budget. Workers and the standalone `Search` tool now pass a per-engine target (`resultsPerQuery × engineCount`, capped at 20/engine), so every engine contributes its full share before merge/dedupe.
+* **Deeper source extraction:** extraction previously stored only the first `contentLimit` characters of each page. Deep presets now stitch multiple chunks of the same document (`extractPagesPerSource`: 1/1/2/2/3 across shallow→exhaustive) into a single richer source, for long articles and multi-page PDFs.
+* **Richer `Search` tool:** now queries DuckDuckGo + Bing + reference sites by default (plus OpenAlex/Crossref/arXiv when academic APIs are on, and YouTube when enabled), forwards API keys and recency, and accepts optional `engines` and `timeRange` parameters. Results are still scored/ranked by domain authority, URL quality, and freshness.
+* **More detailed reports:** evidence excerpts are now configurable (`evidenceExcerptChars`, preset 300–1000) instead of a hardcoded 120/300-char slice, and the full-source appendix preview was raised from 700 → 1500 chars.
+* **New config knobs:** Content Budget Mode (Auto scales per-page chars with depth, or Manual), Results Per Query override (0 = preset), Evidence Excerpt Per Source, and Adaptive Learning on/off.
+* **Cross-plugin tools:** a new `Use Plugin Tool` tool lets the model list and invoke tools exposed by *other* loaded LM Studio plugins (`ctl.client.plugins.pluginTools`), so Deep Swarm can pull evidence/capabilities from companion plugins. Configure target plugin ids via the `externalPluginTools` setting; the remote session is always disposed.
+* **Real adaptive learning (persistent):** the advertised `priority` engine-selection mode is now implemented, and outcome statistics persist across runs under `~/.deep-swarm-research/` — engine success EMAs now order engines in Priority mode, mutation strategies are ranked by historical acceptance, and domains get a small score adjustment based on accepted/rejected history (after ≥3 samples). When a model is loaded, a final reflection pass distills reusable search-strategy hints that future runs fold into query planning. All of it is heuristic/statistical — no model weights or plugin code are modified — and it can be disabled with the Adaptive Learning toggle.
 
 ## 🚀 What's New in v5.3.7?
 

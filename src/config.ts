@@ -71,19 +71,64 @@ export const configSchematics = createConfigSchematics()
     "30",
   )
   .field(
+    "contentLimitMode",
+    "select",
+    {
+      displayName: "Content Budget Mode",
+      subtitle:
+        "Auto scales the per-page character budget with the Research Depth preset. " +
+        "Manual uses the 'Content Per Page' value below verbatim.",
+      options: [
+        { value: "auto", displayName: "Auto — scale with depth (recommended)" },
+        { value: "manual", displayName: "Manual — use value below" },
+      ],
+    },
+    "auto",
+  )
+  .field(
     "contentLimitPerPage",
     "numeric",
     {
       displayName: "Content Per Page (chars)",
       subtitle:
-        "Characters extracted per page. Higher = richer but slower. " +
-        "Leave at default to auto-scale with depth preset (1000-20000)",
+        "Characters extracted per source. Higher = richer but slower. " +
+        "Only applied when Content Budget Mode is Manual (1000-20000).",
       min: 1000,
       max: 20000,
       int: true,
       slider: { step: 1000, min: 1000, max: 20000 },
     },
     4000,
+  )
+  .field(
+    "searchResultsPerQuery",
+    "numeric",
+    {
+      displayName: "Results Per Query (override)",
+      subtitle:
+        "How many results to request from each search engine per query. " +
+        "0 = use the Research Depth preset (8-18). Higher = more sources, slower.",
+      min: 0,
+      max: 20,
+      int: true,
+      slider: { step: 1, min: 0, max: 20 },
+    },
+    0,
+  )
+  .field(
+    "evidenceExcerptChars",
+    "numeric",
+    {
+      displayName: "Evidence Excerpt Per Source (chars)",
+      subtitle:
+        "Characters of each source fed into the AI evidence ledger for the final synthesis. " +
+        "0 = use the Research Depth preset (300-1000). Higher = more detailed report.",
+      min: 0,
+      max: 2000,
+      int: true,
+      slider: { step: 100, min: 0, max: 2000 },
+    },
+    0,
   )
   .field(
     "enableLinkFollowing",
@@ -258,6 +303,32 @@ export const configSchematics = createConfigSchematics()
       ],
     },
     "standard",
+  )
+  .field(
+    "externalPluginTools",
+    "string",
+    {
+      displayName: "External Plugin Tools (Advanced)",
+      subtitle:
+        "Comma-separated identifiers of other enabled LM Studio plugins whose tools " +
+        "this plugin may call (e.g. lmstudio/rag-v1, dev/owner/plugin). Leave blank to disable.",
+    },
+    "",
+  )
+  .field(
+    "enableAdaptiveLearning",
+    "select",
+    {
+      displayName: "Adaptive Learning",
+      subtitle:
+        "Persist engine/mutation/domain performance across runs and reorder heuristics " +
+        "toward what has worked. Does not change model weights or plugin code.",
+      options: [
+        { value: "on", displayName: "On — learn from past runs (recommended)" },
+        { value: "off", displayName: "Off — stateless" },
+      ],
+    },
+    "on",
   )
   // Add this right BEFORE the final .build()
   .field(

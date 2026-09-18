@@ -134,6 +134,10 @@ export interface SwarmTask {
   readonly extraEngines: ReadonlyArray<string>;
   readonly linkCrawlDepth: number;
   readonly queryMutationThreshold: number;
+  /** Content chunks to extract per source (see DepthProfile.extractPagesPerSource). */
+  readonly extractPagesPerSource?: number;
+  /** Chars per source fed to the AI evidence ledger. */
+  readonly evidenceExcerptChars?: number;
   readonly enableLocalSources: boolean;
   readonly enableYouTube?: boolean;
   readonly localLibraryIds?: ReadonlyArray<string>;
@@ -144,6 +148,8 @@ export interface SwarmTask {
   readonly flaresolverrUrl?: string;
   readonly rssFeedUrls?: ReadonlyArray<string>;
   readonly telegramChannels?: ReadonlyArray<string>;
+  /** When false, no persistent heuristic learning is recorded. Default: true. */
+  readonly enableAdaptiveLearning?: boolean;
 }
 
 
@@ -251,7 +257,20 @@ export interface ResearchConfig {
   readonly topic: string;
   readonly focusAreas: ReadonlyArray<string>;
   readonly depthPreset: import("./constants").DepthPreset;
+  /**
+   * Controls `contentLimitPerPage`. "auto" scales the per-page character budget
+   * with the depth preset; "manual" uses `contentLimitPerPage` verbatim.
+   */
+  readonly contentLimitMode?: "auto" | "manual";
   readonly contentLimitPerPage: number;
+  /**
+   * Optional override for results fetched per query. Omit or 0 to use the depth preset.
+   */
+  readonly searchResultsPerQuery?: number;
+  /**
+   * Optional override for chars per source fed into AI synthesis. Omit or 0 to use the preset.
+   */
+  readonly evidenceExcerptChars?: number;
   readonly contextIsolation?: ContextIsolationMode;
   readonly llmCallMode?: "compact" | "standard" | "deep" | "extended";
   readonly enableLinkFollowing: boolean;
@@ -294,6 +313,18 @@ export interface ResearchConfig {
   readonly braveApiKey?: string;
   readonly rssFeedUrls?: ReadonlyArray<string>;
   readonly telegramChannels?: ReadonlyArray<string>;
+
+  /**
+   * Comma-separated identifiers of other enabled LM Studio plugins whose tools
+   * may be invoked (e.g. "lmstudio/rag-v1"). Empty disables cross-plugin tools.
+   */
+  readonly externalPluginTools?: ReadonlyArray<string>;
+
+  /**
+   * Persistent heuristic learning (engine priority stats, mutation stats,
+   * domain adjustments, LLM hints). Default: on.
+   */
+  readonly enableAdaptiveLearning?: boolean;
 }
 
 export interface ResearchResult {

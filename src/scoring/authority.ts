@@ -13,6 +13,7 @@ import {
   LINK_KEYWORD_BONUS,
 } from "../constants";
 import { ScoredCandidate, SearchHit, SourceTier, Outlink } from "../types";
+import { getDomainAdjustments } from "../swarm/learning";
 
 type DomainEntry = readonly [score: number, tier: SourceTier];
 
@@ -157,10 +158,15 @@ export function scoreCandidate(hit: SearchHit, query: string): ScoredCandidate {
   const urlQuality = computeUrlQuality(hit.url);
   const freshnessScore = estimateFreshness(hit.url, hit.title, hit.snippet);
 
+  // Persistent learning: nudge the score by how well this domain has historically
+  // yielded accepted, on-topic sources. No-op until a domain has enough samples.
+  const learnedAdjustment = getDomainAdjustments().adjustment(hostname);
+
   const totalScore = Math.round(
     domainScore * SCORE_WEIGHT_DOMAIN +
     urlQuality * SCORE_WEIGHT_URL_QUALITY +
-    freshnessScore * SCORE_WEIGHT_FRESHNESS,
+    freshnessScore * SCORE_WEIGHT_FRESHNESS +
+    learnedAdjustment,
   );
 
   return {

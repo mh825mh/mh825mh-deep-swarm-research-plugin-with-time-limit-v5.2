@@ -28,6 +28,10 @@ export interface DepthProfile {
   readonly extraEngines: ReadonlyArray<string>;
   readonly linkCrawlDepth: number;
   readonly queryMutationThreshold: number;
+  /** How many content chunks (of `defaultContentLimit` chars each) to extract per source. */
+  readonly extractPagesPerSource: number;
+  /** Characters of each source fed into the AI evidence ledger for synthesis. */
+  readonly evidenceExcerptChars: number;
 }
 
 export const DEPTH_PROFILES: Readonly<Record<DepthPreset, DepthProfile>> = {
@@ -39,6 +43,7 @@ export const DEPTH_PROFILES: Readonly<Record<DepthPreset, DepthProfile>> = {
     synthesisMaxSources: 15, synthesisSourceChars: 500, synthesisMaxTokens: 3_000, contradictionMaxSources: 10,
     stagnationThreshold: 1, searchPages: 1, searchLanes: 2, workerFanOut: 1,
     extraEngines: ["bing", "brave"], linkCrawlDepth: 1, queryMutationThreshold: 2,
+    extractPagesPerSource: 1, evidenceExcerptChars: 300,
   },
   standard: {
     depthRounds: 3, pageBudgetPerWorker: 8, pageBudgetPerGapWorker: 6, defaultContentLimit: 6_000,
@@ -48,6 +53,7 @@ export const DEPTH_PROFILES: Readonly<Record<DepthPreset, DepthProfile>> = {
     synthesisMaxSources: 20, synthesisSourceChars: 500, synthesisMaxTokens: 4_000, contradictionMaxSources: 15,
     stagnationThreshold: 1, searchPages: 1, searchLanes: 2, workerFanOut: 1,
     extraEngines: ["bing", "brave", "searxng"], linkCrawlDepth: 1, queryMutationThreshold: 2,
+    extractPagesPerSource: 1, evidenceExcerptChars: 400,
   },
   deep: {
     depthRounds: 5, pageBudgetPerWorker: 10, pageBudgetPerGapWorker: 8, defaultContentLimit: 8_000,
@@ -57,6 +63,7 @@ export const DEPTH_PROFILES: Readonly<Record<DepthPreset, DepthProfile>> = {
     synthesisMaxSources: 30, synthesisSourceChars: 400, synthesisMaxTokens: 5_000, contradictionMaxSources: 20,
     stagnationThreshold: 2, searchPages: 2, searchLanes: 3, workerFanOut: 2,
     extraEngines: ["bing", "brave", "searxng"], linkCrawlDepth: 2, queryMutationThreshold: 3,
+    extractPagesPerSource: 2, evidenceExcerptChars: 600,
   },
   deeper: {
     depthRounds: 8, pageBudgetPerWorker: 15, pageBudgetPerGapWorker: 12, defaultContentLimit: 10_000,
@@ -66,6 +73,7 @@ export const DEPTH_PROFILES: Readonly<Record<DepthPreset, DepthProfile>> = {
     synthesisMaxSources: 40, synthesisSourceChars: 400, synthesisMaxTokens: 6_000, contradictionMaxSources: 25,
     stagnationThreshold: 2, searchPages: 2, searchLanes: 3, workerFanOut: 2,
     extraEngines: ["bing", "scholar", "brave", "searxng"], linkCrawlDepth: 2, queryMutationThreshold: 3,
+    extractPagesPerSource: 2, evidenceExcerptChars: 800,
   },
   exhaustive: {
     depthRounds: 12, pageBudgetPerWorker: 20, pageBudgetPerGapWorker: 15, defaultContentLimit: 12_000,
@@ -75,6 +83,7 @@ export const DEPTH_PROFILES: Readonly<Record<DepthPreset, DepthProfile>> = {
     synthesisMaxSources: 50, synthesisSourceChars: 300, synthesisMaxTokens: 8_000, contradictionMaxSources: 30,
     stagnationThreshold: 3, searchPages: 3, searchLanes: 4, workerFanOut: 3,
     extraEngines: ["bing", "scholar", "brave", "searxng"], linkCrawlDepth: 3, queryMutationThreshold: 4,
+    extractPagesPerSource: 3, evidenceExcerptChars: 1000,
   },
 };
 
@@ -113,7 +122,7 @@ export const CONSENSUS_OVERLAP_FRACTION = 0.4;
 export const MAX_CONSENSUS_PHRASES = 10;
 export const KEY_SENTENCES_PER_SOURCE = 3;
 export const MAX_SOURCES_PER_DIMENSION = 5;
-export const REPORT_SOURCE_PREVIEW_CHARS = 700;
+export const REPORT_SOURCE_PREVIEW_CHARS = 1500;
 export const MULTI_READ_BATCH_DELAY_MS = 500;
 export const DIMENSION_COVERAGE_MIN_HITS = 3;
 export const DIMENSION_COVERAGE_MIN_CHARS = 200;
@@ -156,6 +165,8 @@ export const MAX_SOURCES_DEFAULT = 25;
 export const SEARCH_RESULTS_MIN = 1;
 export const SEARCH_RESULTS_MAX = 20;
 export const SEARCH_RESULTS_DEFAULT = 10;
+/** Hard safety cap on results fetched *per engine* from the extra/fallback engines. */
+export const EXTRA_ENGINE_MAX_RESULTS = 20;
 
 export const SYSTEM_INSTRUCTIONS = `You are a core component of the Deep Swarm Research engine.
 Your goal is to provide precise, high-quality research planning, task decomposition, and findings synthesis.

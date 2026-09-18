@@ -51,8 +51,10 @@ import { harvestLocalSources } from "../local/search";
 import {
   BATCH_INTER_FETCH_DELAY_MS,
   MIN_USEFUL_WORD_COUNT,
+  EXTRA_ENGINE_MAX_RESULTS,
 } from "../constants";
 import { normalizeUrl } from "./visited-cache";
+import { getEngineStats, getMutationStats, getDomainAdjustments } from "./learning";
 
 export interface CrawlMetrics {
   ddgQueries: number;
@@ -229,6 +231,7 @@ export async function runWorker(
         health.recordDdgSuccess(ddgHits.length);
         metrics.ddgHits += ddgHits.length;
         effectiveHitCount = ddgHits.length;
+        if (task.enableAdaptiveLearning !== false) getEngineStats().record("ddg", ddgHits.length);
 
         // Track Attribution
         for (const h of ddgHits) {
@@ -284,11 +287,18 @@ export async function runWorker(
         warn(`${roleTag} LLM call budget exhausted, skipping LLM mutation (heuristics still run).`);
       }
       
-      const mutationsToTry = [llmMutated, ...MUTATION_STRATEGIES.map((s) => s(query))].filter((m): m is string => !!m && m !== query);
-      let bestMutation: { query: string; hits: ReadonlyArray<SearchHit> } | null = null;
+      const strategyIndices = task.enableAdaptiveLearning !== false
+        ? getMutationStats().rankIndices(MUTATION_STRATEGIES.length, task.role)
+        : MUTATION_STRATEGIES.map((_, i) => i);
+      const mutationsToTry: Array<{ text: string; strategyIndex: number | null }> = [
+        ...(llmMutated ? [{ text: llmMutated, strategyIndex: null }] : []),
+        ...strategyIndices.map((i) => ({ text: MUTATION_STRATEGIES[i](query), strategyIndex: i })),
+      ].filter((m) => !!m.text && m.text !== query);
+
+      let bestMutation: { query: string; hits: ReadonlyArray<SearchHit>; strategyIndex: number | null } | null = null;
       const baseline = mutationQuality(ddgHits, query);
 
-      for (const mutated of mutationsToTry) {
+      for (const { text: mutated, strategyIndex } of mutationsToTry) {
         if (signal.aborted) break;
         metrics.mutatedQueriesTried++;
         metrics.ddgQueries++;
@@ -297,9 +307,13 @@ export async function runWorker(
           const mutHits = await searchDDG(mutated, task.searchResultsPerQuery, task.safeSearch, signal, limiter, task.timeRange ?? "all");
           metrics.ddgHits += mutHits.length;
 
-          if (mutationQuality(mutHits, query) > baseline) {
+          const improved = mutationQuality(mutHits, query) > baseline;
+          if (strategyIndex !== null && task.enableAdaptiveLearning !== false) {
+            getMutationStats().record(strategyIndex, improved, task.role);
+          }
+          if (improved) {
             if (!bestMutation || mutationQuality(mutHits, query) > mutationQuality(bestMutation.hits, query)) {
-              bestMutation = { query: mutated, hits: mutHits };
+              bestMutation = { query: mutated, hits: mutHits, strategyIndex };
             }
           }
         } catch (err) {
@@ -333,7 +347,8 @@ export async function runWorker(
           if (usableEngines.length > 0) {
             try {
               const mutExtraHits = await multiEngineSearch(
-                bestMutation.query, Math.min(task.searchResultsPerQuery, 8),
+                bestMutation.query,
+                Math.min(task.searchResultsPerQuery, EXTRA_ENGINE_MAX_RESULTS) * Math.max(1, usableEngines.length),
                 usableEngines,
                 signal, () => limiter, task.timeRange ?? "all",
                 { serperApiKey: (task as any).serperApiKey, braveApiKey: (task as any).braveApiKey, rssFeedUrls: (task as any).rssFeedUrls, telegramChannels: (task as any).telegramChannels }
@@ -345,6 +360,7 @@ export async function runWorker(
                 if (!trackedEngines.has(engine)) continue;
                 const engineHits = mutExtraHits.filter((h) => h.discoveredBy === engine).length;
                 health.recordOtherEngineHit(engine, engineHits);
+                if (task.enableAdaptiveLearning !== false) getEngineStats().record(engine, engineHits);
               }
             } catch {}
           }
@@ -371,7 +387,8 @@ export async function runWorker(
           warn(`${roleTag} All extra engines in cooldown, skipping extra-engine search.`);
         } else {
           const extraHits = await multiEngineSearch(
-            query, Math.min(task.searchResultsPerQuery, 8),
+            query,
+            Math.min(task.searchResultsPerQuery, EXTRA_ENGINE_MAX_RESULTS) * Math.max(1, usableEngines.length),
             usableEngines,
             signal, () => limiter, task.timeRange ?? "all",
             { serperApiKey: (task as any).serperApiKey, braveApiKey: (task as any).braveApiKey, rssFeedUrls: (task as any).rssFeedUrls, telegramChannels: (task as any).telegramChannels }
@@ -385,6 +402,7 @@ export async function runWorker(
             if (!trackedEngines.has(engine)) continue;
             const engineHits = extraHits.filter((h) => h.discoveredBy === engine).length;
             health.recordOtherEngineHit(engine, engineHits);
+            if (task.enableAdaptiveLearning !== false) getEngineStats().record(engine, engineHits);
           }
         }
       } catch {}
@@ -505,8 +523,8 @@ async function fetchBatch(
       const { page, fromCache } = settledResult.value;
 
       if (page.wordCount < MIN_USEFUL_WORD_COUNT) { metrics.skippedLowWordCount++; if (fromCache) metrics.cacheRejectedLowWordCount++; continue; }
-      if (page.relevanceScore < minRelevance * 0.5) { metrics.skippedVeryOffTopic++; if (fromCache) metrics.cacheRejectedOffTopic++; else state.noteDomainFailure(candidate.url); continue; }
-      if (page.relevanceScore < minRelevance) { metrics.skippedOffTopic++; if (fromCache) metrics.cacheRejectedOffTopic++; continue; }
+      if (page.relevanceScore < minRelevance * 0.5) { metrics.skippedVeryOffTopic++; if (fromCache) metrics.cacheRejectedOffTopic++; else state.noteDomainFailure(candidate.url); if (task.enableAdaptiveLearning !== false) getDomainAdjustments().record(safeHostname(candidate.url), false); continue; }
+      if (page.relevanceScore < minRelevance) { metrics.skippedOffTopic++; if (fromCache) metrics.cacheRejectedOffTopic++; if (task.enableAdaptiveLearning !== false) getDomainAdjustments().record(safeHostname(candidate.url), false); continue; }
 
       const fp = contentFingerprint(page.text);
       if (state.contentHashes.has(fp)) { metrics.skippedDuplicateContent++; if (fromCache) metrics.cacheRejectedDuplicate++; continue; }
@@ -524,6 +542,7 @@ async function fetchBatch(
 
       results.push(page);
       llmManager.recordProgress(); // Tell the watchdog we found something!
+      if (task.enableAdaptiveLearning !== false) getDomainAdjustments().record(safeHostname(candidate.url), true);
 
       status(`${tag} [${results.length}/${task.pageBudget}] ${fromCache ? "[cache] " : ""}(rel=${page.relevanceScore.toFixed(2)}) ${page.title.slice(0, 60)}`);
 
@@ -648,16 +667,46 @@ async function fetchAndExtract(
   } else {
     const fetchResult = await fetchWithWaybackFallback(url, signal, task);
     const { finalUrl } = fetchResult;
+    const maxChunks = Math.max(1, task.extractPagesPerSource ?? 1);
 
     const isPdf = (fetchResult.rawBuffer && isPdfContentType(fetchResult.contentType)) || (!fetchResult.rawBuffer && isPdfUrl(url));
 
-    if (isPdf && fetchResult.rawBuffer) {
-      page = await extractPdf(fetchResult.rawBuffer, url, finalUrl, task.contentLimit, false);
-    } else if (isPdf && fetchResult.html && fetchResult.html.startsWith("%PDF")) {
-      const buf = Buffer.from(fetchResult.html, "binary");
-      page = await extractPdf(buf, url, finalUrl, task.contentLimit, false);
-    } else {
-      page = extractPage(fetchResult.html, url, finalUrl, task.contentLimit, task.maxOutlinksPerPage);
+    const extractChunk = async (pageNo: number): Promise<ExtractedPage> => {
+      if (isPdf && fetchResult.rawBuffer) {
+        return extractPdf(fetchResult.rawBuffer, url, finalUrl, task.contentLimit, false, 20, pageNo);
+      }
+      if (isPdf && fetchResult.html && fetchResult.html.startsWith("%PDF")) {
+        const buf = Buffer.from(fetchResult.html, "binary");
+        return extractPdf(buf, url, finalUrl, task.contentLimit, false, 20, pageNo);
+      }
+      return extractPage(fetchResult.html, url, finalUrl, task.contentLimit, task.maxOutlinksPerPage, pageNo);
+    };
+
+    page = await extractChunk(1);
+
+    // Deep extraction: `extractPage`/`extractPdf` return only `contentLimit`
+    // chars per chunk (page 1). For deeper presets, stitch the next chunks of the
+    // SAME document so long articles/papers are captured in full.
+    const availableChunks = page.totalPages ?? 1;
+    if (maxChunks > 1 && availableChunks > 1) {
+      const total = Math.min(maxChunks, availableChunks);
+      const chunks: string[] = [page.text];
+      for (let p = 2; p <= total; p++) {
+        if (signal.aborted) break;
+        try {
+          const next = await extractChunk(p);
+          if (next.text.trim()) chunks.push(next.text);
+        } catch {
+          break;
+        }
+      }
+      const merged = chunks.join("\n\n").trim();
+      page = {
+        ...page,
+        text: merged.slice(0, task.contentLimit * total),
+        wordCount: merged.split(/\s+/).filter(Boolean).length,
+        totalPages: total,
+      };
     }
   }
 

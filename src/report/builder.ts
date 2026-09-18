@@ -267,11 +267,15 @@ export async function buildReport(
       extraEngines: [],
       linkCrawlDepth: 1,
       queryMutationThreshold: 2,
+      extractPagesPerSource: 1,
+      evidenceExcerptChars: 600,
     };
     const p = profile ?? defaultProfile;
 
     
      // Inside buildReport() mapping evidence cards:
+    const excerptChars = Math.max(200, p.evidenceExcerptChars || 300);
+    const claimChars = Math.min(300, Math.round(excerptChars * 0.4));
     const evidence: EvidenceCard[] = sources.map((s, i) => {
       const domain = safeHostname(s.url);
       const isOfficial = s.domainScore >= 90;
@@ -301,8 +305,8 @@ export async function buildReport(
         authorOrHost: domain,
         canonicalUrl: s.url,
         sourceTier: s.tier,
-        relevantClaim: s.description || s.text.slice(0, 120),
-        supportingExcerpt: s.text.slice(0, 300).replace(/\n+/g, " ").trim(),
+        relevantClaim: s.description || s.text.slice(0, claimChars),
+        supportingExcerpt: s.text.slice(0, excerptChars).replace(/\n+/g, " ").trim(),
         confidence: s.relevanceScore > 0.6 ? "High" : s.relevanceScore > 0.35 ? "Medium" : "Low",
         claimStrength,
         freshness: s.published,

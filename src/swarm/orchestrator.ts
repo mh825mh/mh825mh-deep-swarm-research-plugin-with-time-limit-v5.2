@@ -25,7 +25,8 @@ import { VisitedPageCache, normalizeUrl } from "./visited-cache";
 import { log } from "./logger";
 import { detectContradictions } from "../synthesis/ai";
 import { SearchHealthTracker, EngineState } from "./health";
-import { LlmCallManager } from "../utils/llm";
+import { LlmCallManager, askLoadedModel, hasLoadedModel } from "../utils/llm";
+import { getEngineStats, getLearnedHints } from "./learning";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -194,10 +195,10 @@ function getEnginesForRole(
   if (cfg.enableAcademicAPIs && (role === "academic" || role === "technical")) roleEngines.push("openalex", "crossref", "arxiv");
   if (role === "recency" || role === "critical") roleEngines.push("gdelt");
 
-  if (roleEngines.length === 0) {
-    roleEngines.push("ddg", "bing", "brave");
-  } else {
-    roleEngines.push("ddg", "bing", "brave");
+  roleEngines.push("ddg", "bing", "brave");
+
+  if (mode === "priority" && cfg.enableAdaptiveLearning !== false) {
+    return getEngineStats().orderEngines(roleEngines);
   }
 
   return roleEngines;
@@ -228,6 +229,8 @@ function buildTaskBase(
   | "extraEngines"
   | "linkCrawlDepth"
   | "queryMutationThreshold"
+  | "extractPagesPerSource"
+  | "evidenceExcerptChars"
   | "enableLocalSources"
   | "localLibraryIds"
   | "timeRange"
@@ -238,11 +241,18 @@ function buildTaskBase(
   | "flaresolverrUrl"
   | "rssFeedUrls"
   | "telegramChannels"
+  | "enableAdaptiveLearning"
 > {
   return {
-    contentLimit: cfg.contentLimitPerPage,
+    contentLimit:
+      cfg.contentLimitMode === "manual"
+        ? cfg.contentLimitPerPage
+        : profile.defaultContentLimit,
     safeSearch: cfg.safeSearch,
-    searchResultsPerQuery: profile.searchResultsPerQuery,
+    searchResultsPerQuery:
+      cfg.searchResultsPerQuery && cfg.searchResultsPerQuery > 0
+        ? cfg.searchResultsPerQuery
+        : profile.searchResultsPerQuery,
     maxPagesPerDomain: profile.maxPagesPerDomain,
     maxLinksToEvaluate: profile.maxLinksToEvaluate,
     maxLinksToFollow: profile.maxLinksToFollow,
@@ -254,6 +264,11 @@ function buildTaskBase(
     extraEngines: getEnginesForRole("breadth", cfg, cfg.engineSelectionMode ?? "adaptive"),
     linkCrawlDepth: profile.linkCrawlDepth,
     queryMutationThreshold: profile.queryMutationThreshold,
+    extractPagesPerSource: profile.extractPagesPerSource,
+    evidenceExcerptChars:
+      cfg.evidenceExcerptChars && cfg.evidenceExcerptChars > 0
+        ? cfg.evidenceExcerptChars
+        : profile.evidenceExcerptChars,
     enableLocalSources: cfg.enableLocalSources,
     localLibraryIds: cfg.localLibraryIds,
     timeRange: cfg.timeRange,
@@ -264,6 +279,7 @@ function buildTaskBase(
     flaresolverrUrl: cfg.flaresolverrUrl,
     rssFeedUrls: cfg.rssFeedUrls,
     telegramChannels: cfg.telegramChannels,
+    enableAdaptiveLearning: cfg.enableAdaptiveLearning !== false,
   };
 }
 
@@ -483,7 +499,15 @@ export async function runSwarm(
   fileStatus(`\n🚀 DEEP RESEARCH SWARM LAUNCHED (Strict Priority Mode)\n`);
   fileStatus(`[RUN CONTROL] Budget: ${llmManager.budget.maxGlobalCalls} calls | Timeout: ${llmManager.budget.maxRuntimeMs / 60000}m | Isolation: ${llmManager.isolationMode}`);
 
-  const plan = await buildQueryPlan(cfg.topic, cfg.focusAreas, cfg.enableAIPlanning, fileStatus, profile);
+  const plan = await buildQueryPlan(
+    cfg.topic,
+    cfg.enableAdaptiveLearning !== false
+      ? [...cfg.focusAreas, ...getLearnedHints().all().slice(0, 5)]
+      : cfg.focusAreas,
+    cfg.enableAIPlanning,
+    fileStatus,
+    profile,
+  );
   const roles = rolesForProfile(profile);
   const pool = new DdgLimiterPool(profile.searchLanes, profile.ddgRateLimitMs);
 
@@ -646,6 +670,10 @@ export async function runSwarm(
   fileStatus(health.generateReport());
   fileStatus(llmManager.getReport());
 
+  if (cfg.enableAdaptiveLearning !== false && !signal.aborted) {
+    await maybeLearnFromRun(cfg, allSources, fileStatus);
+  }
+
   return {
     sources: allSources,
     queriesUsed: [...new Set(allQueries)],
@@ -654,6 +682,52 @@ export async function runSwarm(
     topicKeywords: plan.topicKeywords,
     runStats: buildRunStats(health, llmManager, state, runStartedAt),
   };
+}
+
+/**
+ * Self-improvement (F4): ask the loaded model to reflect on the strongest
+ * sources from this run and persist generalizable search-strategy hints that
+ * future runs fold into their query planning. Best-effort and non-blocking.
+ */
+async function maybeLearnFromRun(
+  cfg: ResearchConfig,
+  sources: ReadonlyArray<CrawledSource>,
+  status: StatusFn,
+): Promise<void> {
+  try {
+    if (!(await hasLoadedModel())) return;
+
+    const topSources = [...sources]
+      .sort((a, b) => b.relevanceScore - a.relevanceScore)
+      .slice(0, 8)
+      .map((s) => `- ${s.title} (${safeHostname(s.url)}, rel=${s.relevanceScore.toFixed(2)})`)
+      .join("\n");
+
+    const prompt = `You are tuning a web-research agent. Topic: "${cfg.topic}".
+Best sources found:
+${topSources || "(none)"}
+
+Provide up to 3 short, generalizable search-strategy hints for future runs on similar topics.
+One hint per line, no numbering, no preamble, max 160 chars each.`;
+
+    const result = await askLoadedModel(prompt, {
+      maxTokens: 220,
+      temperature: 0.4,
+      timeoutMs: 20_000,
+    });
+    if (!result) return;
+
+    const hints = result
+      .split("\n")
+      .map((line) => line.replace(/^[\s\-*\d.)]+/, "").trim())
+      .filter((line) => line.length > 0);
+    if (hints.length > 0) {
+      getLearnedHints().addHints(hints.slice(0, 3));
+      status(`[LEARN] Stored ${Math.min(hints.length, 3)} strategy hint(s) for future runs.`);
+    }
+  } catch {
+    /* best-effort */
+  }
 }
 
 function buildRunStats(
