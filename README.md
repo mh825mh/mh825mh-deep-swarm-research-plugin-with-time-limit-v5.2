@@ -1,8 +1,12 @@
-# 🐝 Deep Research w/ Swarm Agent (v5.5.0)
+# 🐝 Deep Research w/ Swarm Agent (v5.5.1)
 
 
 
 Autonomous deep research for LM Studio. A swarm of specialized AI workers searches your local documents and the web, dynamically adapting its strategy, verifying claims, and synthesizing everything into a structured, confidence-scored report with auditable citations—all in one tool call.
+
+## 🚀 What's New in v5.5.1?
+
+* **Fixed plugin load failure:** `got-scraping` v4 is ESM-only, but LM Studio bundles plugins as CommonJS and requires it externally, which crashed startup with `ERR_PACKAGE_PATH_NOT_EXPORTED`. The waterfall fetcher now loads it lazily via an indirect dynamic `import()`, so the plugin registers cleanly; if the module is ever unavailable the TLS tier is skipped and fetching falls through to FlareSolverr/Wayback. The Wayback tier now uses the built-in `fetch` instead of `got-scraping`.
 
 ## 🚀 What's New in v5.5.0?
 

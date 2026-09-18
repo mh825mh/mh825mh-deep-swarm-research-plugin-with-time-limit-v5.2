@@ -1,8 +1,40 @@
-import { gotScraping } from 'got-scraping';
+/**
+ * Multi-tiered resilient fetcher for LM Studio research swarm workers.
+ *
+ * NOTE: `got-scraping` v4 is ESM-only. LM Studio bundles plugins as CommonJS
+ * and leaves dependencies external, so a top-level `import` becomes a
+ * `require("got-scraping")` that throws ERR_PACKAGE_PATH_NOT_EXPORTED on load.
+ * We therefore load it lazily via an indirect dynamic import (opaque to the
+ * bundler) and gracefully disable the tier if it can't be loaded.
+ */
+
+type GotScrapingResponse = { statusCode?: number; body: unknown };
+type GotScrapingModule = {
+  gotScraping: {
+    get(url: string, options?: Record<string, unknown>): Promise<GotScrapingResponse>;
+  };
+};
+
+let modPromise: Promise<GotScrapingModule | null> | null = null;
+
+function loadGotScraping(): Promise<GotScrapingModule | null> {
+  if (!modPromise) {
+    const dynamicImport = new Function("s", "return import(s)") as (
+      specifier: string,
+    ) => Promise<GotScrapingModule>;
+    modPromise = dynamicImport("got-scraping").catch((err: any) => {
+      console.warn(
+        `[Tier A] got-scraping unavailable (${err?.code ?? err?.message}); skipping TLS tier.`,
+      );
+      return null;
+    });
+  }
+  return modPromise;
+}
 
 /**
  * Multi-tiered resilient fetcher for LM Studio research swarm workers.
- * 
+ *
  * @param url The target URL to fetch.
  * @param abortSignal AbortSignal to propagate timeouts and cancellation.
  * @param flaresolverrUrl Optional FlareSolverr endpoint (e.g. "http://127.0.0.1:8191/v1").
@@ -16,29 +48,32 @@ export async function fetchWithWaterfall(
   // ==========================================
   // TIER A: got-scraping (Native TLS Fingerprinting)
   // ==========================================
-  try {
-    console.log(`[Tier A] Fetching ${url} with got-scraping...`);
-    const response = await gotScraping.get(url, {
-      signal: abortSignal,
-      throwHttpErrors: false, // Don't throw on 403/503 so we can inspect the challenge body
-    });
+  const gs = await loadGotScraping();
+  if (gs) {
+    try {
+      console.log(`[Tier A] Fetching ${url} with got-scraping...`);
+      const response = await gs.gotScraping.get(url, {
+        signal: abortSignal,
+        throwHttpErrors: false, // Don't throw on 403/503 so we can inspect the challenge body
+      });
 
-    const body = response.body as string;
+      const body = response.body as string;
 
-    // Verify status and ensure no Cloudflare/DDoS challenge indicators are present
-    const isChallenge =
-      body.includes('Just a moment...') ||
-      body.includes('cf-browser-verification') ||
-      body.includes('Attention Required! | Cloudflare');
+      // Verify status and ensure no Cloudflare/DDoS challenge indicators are present
+      const isChallenge =
+        body.includes('Just a moment...') ||
+        body.includes('cf-browser-verification') ||
+        body.includes('Attention Required! | Cloudflare');
 
-    if (response.statusCode === 200 && !isChallenge) {
-      return body;
+      if (response.statusCode === 200 && !isChallenge) {
+        return body;
+      }
+
+      console.warn(`[Tier A] Block or challenge detected for ${url} (HTTP ${response.statusCode}). Falling back...`);
+    } catch (error: any) {
+      if (error.name === 'AbortError') throw error;
+      console.warn(`[Tier A] Network error for ${url}: ${error.message}. Falling back...`);
     }
-
-    console.warn(`[Tier A] Block or challenge detected for ${url} (HTTP ${response.statusCode}). Falling back...`);
-  } catch (error: any) {
-    if (error.name === 'AbortError') throw error;
-    console.warn(`[Tier A] Network error for ${url}: ${error.message}. Falling back...`);
   }
 
   // ==========================================
@@ -82,13 +117,11 @@ export async function fetchWithWaterfall(
   try {
     console.log(`[Tier C] Fetching snapshot for ${url} from Web Archive...`);
     const archiveUrl = `https://web.archive.org/web/2/${url}`;
-    const archiveResponse = await gotScraping.get(archiveUrl, {
-      signal: abortSignal,
-      throwHttpErrors: true,
-    });
+    const archiveResponse = await fetch(archiveUrl, { signal: abortSignal });
 
-    if (archiveResponse.statusCode === 200 && archiveResponse.body) {
-      return archiveResponse.body as string;
+    if (archiveResponse.ok) {
+      const body = await archiveResponse.text();
+      if (body) return body;
     }
   } catch (error: any) {
     if (error.name === 'AbortError') throw error;
