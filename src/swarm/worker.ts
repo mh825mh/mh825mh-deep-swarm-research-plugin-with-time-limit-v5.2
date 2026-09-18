@@ -79,6 +79,7 @@ export interface CrawlMetrics {
   skippedDomainCap: number;
   skippedAvoided: number;
   skippedBlacklisted: number;
+  skippedNegativeCache: number;
   cacheChecks: number;
   cacheHits: number;
   cacheAccepted: number;
@@ -109,7 +110,8 @@ export interface SharedCrawlState {
   isRecentlyVisited(url: string): boolean;
   getCachedSource(url: string): CrawledSource | null;
   markVisitedPersistent(source: CrawledSource): void;
-  addWebCacheDocument(source: CrawledSource): void;
+  isRejected(url: string): boolean;
+  markRejected(url: string, reason?: string): void;
   getMetricsSnapshot(): Readonly<CrawlMetrics>;
   mergeMetrics(delta: Partial<CrawlMetrics>): void;
 }
@@ -150,7 +152,7 @@ function zeroMetrics(): CrawlMetrics {
     dedupedHits: 0, rankedCandidates: 0, fetchCandidates: 0, fetchAttempts: 0,
     fetchFailures: 0, acceptedSources: 0, skippedLowWordCount: 0, skippedOffTopic: 0,
     skippedVeryOffTopic: 0, skippedDuplicateContent: 0, skippedVisited: 0, skippedDomainCap: 0,
-    skippedAvoided: 0, skippedBlacklisted: 0, cacheChecks: 0, cacheHits: 0, cacheAccepted: 0,
+    skippedAvoided: 0, skippedBlacklisted: 0, skippedNegativeCache: 0, cacheChecks: 0, cacheHits: 0, cacheAccepted: 0,
     cacheRejectedDuplicate: 0, cacheRejectedOffTopic: 0, cacheRejectedLowWordCount: 0,
     cacheWrites: 0, followedLinks: 0, crossWorkerDiscoveriesUsed: 0, localSourcesAccepted: 0,
   };
@@ -491,6 +493,7 @@ async function fetchBatch(
       if (state.domainCount(c.url) >= domainCap) { metrics.skippedDomainCap++; continue; }
       if (state.shouldAvoidUrl(c.url)) { metrics.skippedAvoided++; continue; }
       if (state.isDomainBlacklisted(c.url)) { metrics.skippedBlacklisted++; continue; }
+      if (state.isRejected(c.url)) { metrics.skippedNegativeCache++; continue; }
       batch.push(c);
     }
 
@@ -514,6 +517,7 @@ async function fetchBatch(
           metrics.fetchFailures++;
           state.noteFailure(candidate.url, msg);
           state.noteDomainFailure(candidate.url);
+          state.markRejected(candidate.url, msg);
           warn(`${tag} Failed: ${truncUrl(candidate.url)} - ${msg}`);
           errors.push(`fetch:${candidate.url}: ${msg}`);
         }
@@ -522,8 +526,8 @@ async function fetchBatch(
 
       const { page, fromCache } = settledResult.value;
 
-      if (page.wordCount < MIN_USEFUL_WORD_COUNT) { metrics.skippedLowWordCount++; if (fromCache) metrics.cacheRejectedLowWordCount++; continue; }
-      if (page.relevanceScore < minRelevance * 0.5) { metrics.skippedVeryOffTopic++; if (fromCache) metrics.cacheRejectedOffTopic++; else state.noteDomainFailure(candidate.url); if (task.enableAdaptiveLearning !== false) getDomainAdjustments().record(safeHostname(candidate.url), false); continue; }
+      if (page.wordCount < MIN_USEFUL_WORD_COUNT) { metrics.skippedLowWordCount++; if (fromCache) metrics.cacheRejectedLowWordCount++; else state.markRejected(candidate.url, "low-word-count"); continue; }
+      if (page.relevanceScore < minRelevance * 0.5) { metrics.skippedVeryOffTopic++; if (fromCache) metrics.cacheRejectedOffTopic++; else { state.noteDomainFailure(candidate.url); state.markRejected(candidate.url, "very-off-topic"); } if (task.enableAdaptiveLearning !== false) getDomainAdjustments().record(safeHostname(candidate.url), false); continue; }
       if (page.relevanceScore < minRelevance) { metrics.skippedOffTopic++; if (fromCache) metrics.cacheRejectedOffTopic++; if (task.enableAdaptiveLearning !== false) getDomainAdjustments().record(safeHostname(candidate.url), false); continue; }
 
       const fp = contentFingerprint(page.text);
@@ -537,7 +541,6 @@ async function fetchBatch(
       } else {
         state.markVisitedPersistent(page);
         metrics.cacheWrites++;
-        state.addWebCacheDocument(page);
       }
 
       results.push(page);

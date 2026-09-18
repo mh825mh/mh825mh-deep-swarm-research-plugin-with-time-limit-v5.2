@@ -189,8 +189,9 @@ export const configSchematics = createConfigSchematics()
     {
       displayName: "Max Session Time (minutes)",
       subtitle:
-        "Hard cap on wall-clock time for Deep Research runs. " +
-        "Set to 0 for Unlimited (runs until exhausted or stagnates).",
+        "Wall-clock cap for Deep Research runs. The effective limit is " +
+        "min(this value, the LLM Call Mode runtime cap: 10/20/30/45 min). " +
+        "Set to 0 for no session limit (crawling is unbounded; LLM calls stay capped by the mode).",
       min: 0,
       max: 240,
       int: true,

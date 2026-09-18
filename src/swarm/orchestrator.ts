@@ -21,7 +21,7 @@ import {
 import { DepthProfile } from "../constants";
 import { DdgLimiterPool, resetThrottle } from "../net/ddg";
 import { resetArchiveSession, getArchiveState } from "../net/http";
-import { VisitedPageCache, normalizeUrl } from "./visited-cache";
+import { VisitedPageCache, normalizeUrl, type VisitedCacheStats } from "./visited-cache";
 import { log } from "./logger";
 import { detectContradictions } from "../synthesis/ai";
 import { SearchHealthTracker, EngineState } from "./health";
@@ -46,7 +46,8 @@ function zeroMetrics(): CrawlMetrics {
     dedupedHits: 0, rankedCandidates: 0, fetchCandidates: 0, fetchAttempts: 0,
     fetchFailures: 0, acceptedSources: 0, skippedLowWordCount: 0, skippedOffTopic: 0,
     skippedVeryOffTopic: 0, skippedDuplicateContent: 0, skippedVisited: 0,
-    skippedDomainCap: 0, skippedAvoided: 0, skippedBlacklisted: 0, cacheChecks: 0,
+    skippedDomainCap: 0, skippedAvoided: 0, skippedBlacklisted: 0, skippedNegativeCache: 0,
+    cacheChecks: 0,
     cacheHits: 0, cacheAccepted: 0, cacheRejectedDuplicate: 0, cacheRejectedOffTopic: 0,
     cacheRejectedLowWordCount: 0, cacheWrites: 0, followedLinks: 0,
     crossWorkerDiscoveriesUsed: 0, localSourcesAccepted: 0,
@@ -79,11 +80,7 @@ class MutableCrawlState implements SharedCrawlState {
   private readonly _failedHosts = new Map<string, { count: number; reason: string; lastFailedAt: string }>();
   private readonly visitedCache: VisitedPageCache;
   private _metrics: CrawlMetrics = zeroMetrics();
-  
-  addWebCacheDocument(source: CrawledSource): void {
-    // Placeholder for local RAG store
-  }
-  
+
   constructor(cacheDurationDays: number = 30) {
     this.visitedCache = new VisitedPageCache(cacheDurationDays);
   }
@@ -158,8 +155,11 @@ class MutableCrawlState implements SharedCrawlState {
   isRecentlyVisited(url: string): boolean { return this.visitedCache.hasRecent(url); }
   getCachedSource(url: string): CrawledSource | null { return this.visitedCache.getRecent(url); }
   markVisitedPersistent(source: CrawledSource): void { this.visitedCache.markVisited(source); }
+  isRejected(url: string): boolean { return this.visitedCache.isRejected(url); }
+  markRejected(url: string, reason?: string): void { this.visitedCache.markRejected(url, reason); }
   pruneVisitedCache(): void { this.visitedCache.prune(); }
-  cacheStats(): { entries: number; file: string; maxAgeDays: number } { return this.visitedCache.stats(); }
+  cacheStats(): VisitedCacheStats { return this.visitedCache.stats(); }
+  flushCache(): void { this.visitedCache.flush(); }
   getMetricsSnapshot(): Readonly<CrawlMetrics> { return this._metrics; }
   mergeMetrics(delta: Partial<CrawlMetrics>): void { this._metrics = mergeMetricObjects(this._metrics, delta); }
 }
@@ -444,9 +444,13 @@ export interface OrchestratorResult {
     readonly llmCallsUsed: number;
     readonly llmCallBudget: number;
     readonly runtimeElapsedMs: number;
+    readonly sessionLimitMs: number;
+    readonly effectiveRuntimeMs: number;
     readonly cacheEntries: number;
+    readonly cacheNegativeEntries: number;
     readonly cacheFile: string;
     readonly cacheMaxAgeDays: number;
+    readonly cacheMaxEntries: number;
   };
 }
 
@@ -468,9 +472,11 @@ export interface SharedCrawlState {
   isRecentlyVisited(url: string): boolean;
   getCachedSource(url: string): CrawledSource | null;
   markVisitedPersistent(source: CrawledSource): void;
-  addWebCacheDocument(source: CrawledSource): void;
+  isRejected(url: string): boolean;
+  markRejected(url: string, reason?: string): void;
   pruneVisitedCache(): void;
-  cacheStats(): { entries: number; file: string; maxAgeDays: number };
+  cacheStats(): VisitedCacheStats;
+  flushCache(): void;
   getMetricsSnapshot(): Readonly<CrawlMetrics>;
   mergeMetrics(delta: Partial<CrawlMetrics>): void;
 }
@@ -591,12 +597,72 @@ export async function runSwarm(
     return task;
   });
 
-  const maxSessionTimeMs = Math.min(
-    cfg.maxSessionMs && cfg.maxSessionMs > 0 ? cfg.maxSessionMs : Infinity,
-    llmManager.budget.maxRuntimeMs,
-  );
+  // Time budget: keep min(session, LLM mode cap) for a finite session. A value
+  // of 0 means "no session limit" for crawling (LLM calls remain bounded by the
+  // mode budget). The effective runtime is enforced by a real wall-clock timer.
+  const sessionLimitMs =
+    cfg.maxSessionMs && cfg.maxSessionMs > 0 ? cfg.maxSessionMs : Infinity;
+  const modeRuntimeCapMs = llmManager.budget.maxRuntimeMs;
+  const effectiveRuntimeMs =
+    sessionLimitMs === Infinity ? Infinity : Math.min(sessionLimitMs, modeRuntimeCapMs);
+  const fmtMin = (ms: number) => (ms === Infinity ? "unlimited" : `${Math.round(ms / 60000)}m`);
   const startTime = Date.now();
-  const crawlDeadline = startTime + (maxSessionTimeMs * 0.80); // Reserve 20% for synthesis
+  const crawlDeadline =
+    effectiveRuntimeMs === Infinity ? Infinity : startTime + effectiveRuntimeMs * 0.80; // Reserve 20% for synthesis
+
+  fileStatus(
+    `[RUN CONTROL] Session limit: ${fmtMin(sessionLimitMs)} | LLM mode cap: ${fmtMin(modeRuntimeCapMs)} | Effective runtime: ${fmtMin(effectiveRuntimeMs)} (crawl stops at 80%)`,
+  );
+
+  // Hard wall-clock enforcement: abort the whole swarm when the effective
+  // runtime elapses, so a slow layer can't silently overrun the budget.
+  let hardStopTimer: NodeJS.Timeout | null = null;
+  if (effectiveRuntimeMs !== Infinity) {
+    hardStopTimer = setTimeout(() => {
+      if (!llmManager.signal.aborted) {
+        fileWarn(
+          `[TIME LIMIT] Effective runtime reached (${fmtMin(effectiveRuntimeMs)}). ` +
+          `Aborting workers and flushing partial results to synthesis.`,
+        );
+        llmManager.abort();
+      }
+    }, effectiveRuntimeMs);
+    if (typeof hardStopTimer.unref === "function") hardStopTimer.unref();
+  }
+
+  // Dedicated feeds pass: when RSS feeds / Telegram channels are configured,
+  // query them once for the topic (plus the top planned queries) instead of
+  // adding them to every worker's engine set.
+  if (
+    !signal.aborted &&
+    !llmManager.signal.aborted &&
+    Date.now() < crawlDeadline &&
+    (cfg.rssFeedUrls?.length || cfg.telegramChannels?.length)
+  ) {
+    const feedEngines: string[] = [];
+    if (cfg.rssFeedUrls && cfg.rssFeedUrls.length > 0) feedEngines.push("rss");
+    if (cfg.telegramChannels && cfg.telegramChannels.length > 0) feedEngines.push("telegram");
+
+    const plannedQueries = Object.values(plan.queriesByRole)
+      .flatMap((qs) => qs ?? [])
+      .filter(Boolean) as ReadonlyArray<string>;
+    const feedQueries = [cfg.topic, ...plannedQueries]
+      .filter((q, i, arr) => arr.indexOf(q) === i)
+      .slice(0, 3);
+
+    fileStatus(`\n📡 FEEDS: Querying ${feedEngines.join(", ")} for ${feedQueries.length} quer${feedQueries.length === 1 ? "y" : "ies"}...`);
+    const feedTask: SwarmTask = {
+      ...buildStaticTask("breadth", feedQueries, profile, cfg),
+      label: "Feeds",
+      extraEngines: feedEngines,
+    };
+    const feedResults = await runTaskGroup(
+      [feedTask], state, pool, signal, fileStatus, fileWarn, plan.topicKeywords, health, llmManager,
+    );
+    const prevFeedCount = allSources.length;
+    aggregateResults(feedResults, allSources, allQueries, allErrors);
+    fileStatus(`✅ Feeds pass complete. Added ${allSources.length - prevFeedCount} source(s).`);
+  }
 
   for (const layer of ["DDG", "SEARXNG", "DIRECT", "API"]) {
     if (Date.now() >= crawlDeadline || signal.aborted || llmManager.signal.aborted || externalTasks.length === 0) {
@@ -674,13 +740,19 @@ export async function runSwarm(
     await maybeLearnFromRun(cfg, allSources, fileStatus);
   }
 
+  if (hardStopTimer) {
+    clearTimeout(hardStopTimer);
+    hardStopTimer = null;
+  }
+  state.flushCache();
+
   return {
     sources: allSources,
     queriesUsed: [...new Set(allQueries)],
     workerErrors: allErrors,
     usedAI: plan.usedAI,
     topicKeywords: plan.topicKeywords,
-    runStats: buildRunStats(health, llmManager, state, runStartedAt),
+    runStats: buildRunStats(health, llmManager, state, runStartedAt, sessionLimitMs, effectiveRuntimeMs),
   };
 }
 
@@ -735,6 +807,8 @@ function buildRunStats(
   llmManager: LlmCallManager,
   state: SharedCrawlState,
   runStartedAt: number,
+  sessionLimitMs: number,
+  effectiveRuntimeMs: number,
 ): NonNullable<OrchestratorResult["runStats"]> {
   const archive = getArchiveState();
   const cache = state.cacheStats();
@@ -747,9 +821,13 @@ function buildRunStats(
     llmCallsUsed: llmManager.watchdog.llmCallsMade,
     llmCallBudget: llmManager.budget.maxGlobalCalls,
     runtimeElapsedMs: Date.now() - runStartedAt,
+    sessionLimitMs,
+    effectiveRuntimeMs,
     cacheEntries: cache.entries,
+    cacheNegativeEntries: cache.negativeEntries,
     cacheFile: cache.file,
     cacheMaxAgeDays: cache.maxAgeDays,
+    cacheMaxEntries: cache.maxEntries,
   };
 }
 
@@ -771,7 +849,7 @@ function logAggregateMetrics(
   status(`[${label}] search ddg_queries=${m.ddgQueries} ddg_hits=${m.ddgHits} mutation_accepted=${m.mutationAccepted} mutation_hits=${m.mutationHits} extra_hits=${m.extraEngineHits}`);
   status(`[${label}] quality raw_hits=${m.rawHits} deduped_hits=${m.dedupedHits} dedupe_rate=${dedupeRate}% ranked=${m.rankedCandidates} accepted=${m.acceptedSources} fetch_success=${fetchSuccessRate}%`);
   status(`[${label}] cache checks=${m.cacheChecks} hits=${m.cacheHits} hit_rate=${cacheHitRate}% accepted=${m.cacheAccepted} accept_rate=${cacheAcceptRate}% writes=${m.cacheWrites}`);
-  status(`[${label}] skips visited=${m.skippedVisited} dup=${m.skippedDuplicateContent} off_topic=${m.skippedOffTopic} very_off_topic=${m.skippedVeryOffTopic} low_words=${m.skippedLowWordCount} domain_cap=${m.skippedDomainCap} avoided=${m.skippedAvoided} blacklisted=${m.skippedBlacklisted}`);
+  status(`[${label}] skips visited=${m.skippedVisited} dup=${m.skippedDuplicateContent} off_topic=${m.skippedOffTopic} very_off_topic=${m.skippedVeryOffTopic} low_words=${m.skippedLowWordCount} domain_cap=${m.skippedDomainCap} avoided=${m.skippedAvoided} blacklisted=${m.skippedBlacklisted} neg_cache=${m.skippedNegativeCache}`);
   status(`[${label}] 📊 DIAGNOSTICS evidence_yield=${evidenceYield.toFixed(2)}% (accepted_sources/est_llm_tokens)`);
 }
 

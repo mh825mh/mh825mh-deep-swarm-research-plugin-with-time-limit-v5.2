@@ -1,6 +1,6 @@
 {
   "name": "lms-plugin-deep-swarm-research",
-  "version": "5.4.0",
+  "version": "5.5.0",
   "description": "Deep Swarm Research Plugin for LM Studio",
   "main": "dist/index.js",
   "scripts": {
@@ -16,10 +16,14 @@
     "@types/turndown": "^5.0.6",
     "got-scraping": "^4.2.1",
     "jsdom": "^24.0.0",
+    "pdf-parse": "2.3.0",
     "turndown": "^7.2.0"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
     "vitest": "^5.0.1"
+  },
+  "overrides": {
+    "pdfjs-dist": "5.4.296"
   }
 }

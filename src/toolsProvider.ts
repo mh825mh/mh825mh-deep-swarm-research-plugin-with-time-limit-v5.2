@@ -195,6 +195,8 @@ function defaultSearchEngines(cfg: ReturnType<typeof readConfig>): SearchEngine[
   const engines: SearchEngine[] = ["ddg", "bing", "reference"];
   if (cfg.enableAcademicAPIs) engines.push("openalex", "crossref", "arxiv");
   if (cfg.enableYouTube) engines.push("youtube");
+  if (cfg.rssFeedUrls.length > 0) engines.push("rss");
+  if (cfg.telegramChannels.length > 0) engines.push("telegram");
   if (cfg.serperApiKey) engines.push("serper");
   if (cfg.braveApiKey) engines.push("brave-api");
   return engines;

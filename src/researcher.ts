@@ -88,6 +88,8 @@ function buildRunFooter(
 ): string {
   if (!stats) return "";
   const elapsedMin = Math.round(stats.runtimeElapsedMs / 60000);
+  const fmtMin = (ms: number) =>
+    !Number.isFinite(ms) || ms <= 0 ? "unlimited" : `${Math.round(ms / 60000)} min`;
   const lines: string[] = [
     "---",
     "## 🔍 Query Log",
@@ -103,9 +105,11 @@ function buildRunFooter(
     "## 🤖 LLM Watchdog",
     `LLM calls used: ${stats.llmCallsUsed} / ${stats.llmCallBudget}`,
     `Runtime: ${elapsedMin} min`,
+    `Session limit: ${fmtMin(stats.sessionLimitMs)} | Effective runtime: ${fmtMin(stats.effectiveRuntimeMs)}`,
     "",
     "## 💾 Cache & Archives",
-    `Visited cache entries: ${stats.cacheEntries} (max age ${stats.cacheMaxAgeDays} days)`,
+    `Visited cache entries: ${stats.cacheEntries}/${stats.cacheMaxEntries} (max age ${stats.cacheMaxAgeDays} days)`,
+    `Negative-cache entries: ${stats.cacheNegativeEntries}`,
     `Cache file: ${stats.cacheFile}`,
     `Pages archived to Wayback: ${stats.pagesArchived}`,
     `Archive submission failures: ${stats.archiveSubmitFailures}`,

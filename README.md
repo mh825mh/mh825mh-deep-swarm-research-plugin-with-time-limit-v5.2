@@ -1,8 +1,17 @@
-# 🐝 Deep Research w/ Swarm Agent (v5.4.0)
+# 🐝 Deep Research w/ Swarm Agent (v5.5.0)
 
 
 
 Autonomous deep research for LM Studio. A swarm of specialized AI workers searches your local documents and the web, dynamically adapting its strategy, verifying claims, and synthesizing everything into a structured, confidence-scored report with auditable citations—all in one tool call.
+
+## 🚀 What's New in v5.5.0?
+
+* **Fixed page-cache persistence:** the visited-page cache no longer lives in a cwd-relative `.cache/` folder (which could be unwritable or reset depending on the working directory). It now lives under `~/.deep-swarm-research/cache/visited-pages-v2.json`, migrates any existing v1 cache once, writes atomically (temp file + rename), debounces saves, and caps itself at 2,000 entries (oldest evicted first). Post-redirect URLs are aliased back to the requested URL so lookups always hit.
+* **Negative cache:** URLs that fail to fetch or are decisively off-topic/low-content are remembered for 24h (`isRejected`/`markRejected`) and skipped on subsequent runs, avoiding repeated dead-link retries. A successful fetch clears the negative entry.
+* **PDF text extraction:** pages are now extracted from PDFs via `pdf-parse`, so long reports and papers feed real text into extraction instead of being skipped.
+* **Real time-limit enforcement:** the session limit now drives a hard wall-clock abort timer (not just a soft crawl deadline), logs the *effective* runtime (`min(session limit, LLM mode cap)`), and shows requested-vs-effective in the run footer. `0` means **no session limit** for crawling while LLM calls stay bounded by the mode budget.
+* **Feeds run automatically:** when `rssFeedUrls` / `telegramChannels` are configured, a dedicated feed pass queries them once per run (topic + top planned queries) instead of being limited to benchmark mode; the standalone `Search` tool also includes them by default.
+* **Cache visibility:** run footer/logs now report visited + negative-cache entry counts, the cache file path, and negative-cache skips.
 
 ## 🚀 What's New in v5.4.0?
 
