@@ -39,7 +39,7 @@ export const DEPTH_PROFILES: Readonly<Record<DepthPreset, DepthProfile>> = {
     depthRounds: 1, pageBudgetPerWorker: 5, pageBudgetPerGapWorker: 4, defaultContentLimit: 5_000,
     searchResultsPerQuery: 8, maxQueriesPerWorker: 3, maxPagesPerDomain: 3, maxLinksToEvaluate: 20,
     maxLinksToFollow: 2, maxOutlinksPerPage: 20, candidatePoolMultiplier: 2, workerConcurrency: 3,
-    maxDecompositionWorkers: 6, maxGapFillQueries: 4, ddgRateLimitMs: 2_200, minRelevanceScore: 0.15,
+    maxDecompositionWorkers: 6, maxGapFillQueries: 4, ddgRateLimitMs: 3_000, minRelevanceScore: 0.15,
     synthesisMaxSources: 15, synthesisSourceChars: 500, synthesisMaxTokens: 3_000, contradictionMaxSources: 10,
     stagnationThreshold: 1, searchPages: 1, searchLanes: 2, workerFanOut: 1,
     extraEngines: ["bing", "brave"], linkCrawlDepth: 1, queryMutationThreshold: 2,
@@ -49,7 +49,7 @@ export const DEPTH_PROFILES: Readonly<Record<DepthPreset, DepthProfile>> = {
     depthRounds: 3, pageBudgetPerWorker: 8, pageBudgetPerGapWorker: 6, defaultContentLimit: 6_000,
     searchResultsPerQuery: 10, maxQueriesPerWorker: 4, maxPagesPerDomain: 4, maxLinksToEvaluate: 30,
     maxLinksToFollow: 4, maxOutlinksPerPage: 30, candidatePoolMultiplier: 2, workerConcurrency: 3,
-    maxDecompositionWorkers: 8, maxGapFillQueries: 5, ddgRateLimitMs: 2_000, minRelevanceScore: 0.13,
+    maxDecompositionWorkers: 8, maxGapFillQueries: 5, ddgRateLimitMs: 3_000, minRelevanceScore: 0.13,
     synthesisMaxSources: 20, synthesisSourceChars: 500, synthesisMaxTokens: 4_000, contradictionMaxSources: 15,
     stagnationThreshold: 1, searchPages: 1, searchLanes: 2, workerFanOut: 1,
     extraEngines: ["bing", "brave", "searxng"], linkCrawlDepth: 1, queryMutationThreshold: 2,
@@ -59,7 +59,7 @@ export const DEPTH_PROFILES: Readonly<Record<DepthPreset, DepthProfile>> = {
     depthRounds: 5, pageBudgetPerWorker: 10, pageBudgetPerGapWorker: 8, defaultContentLimit: 8_000,
     searchResultsPerQuery: 12, maxQueriesPerWorker: 5, maxPagesPerDomain: 5, maxLinksToEvaluate: 40,
     maxLinksToFollow: 6, maxOutlinksPerPage: 40, candidatePoolMultiplier: 3, workerConcurrency: 4,
-    maxDecompositionWorkers: 10, maxGapFillQueries: 6, ddgRateLimitMs: 1_800, minRelevanceScore: 0.1,
+    maxDecompositionWorkers: 10, maxGapFillQueries: 6, ddgRateLimitMs: 3_000, minRelevanceScore: 0.1,
     synthesisMaxSources: 30, synthesisSourceChars: 400, synthesisMaxTokens: 5_000, contradictionMaxSources: 20,
     stagnationThreshold: 2, searchPages: 2, searchLanes: 3, workerFanOut: 2,
     extraEngines: ["bing", "brave", "searxng"], linkCrawlDepth: 2, queryMutationThreshold: 3,
@@ -69,7 +69,7 @@ export const DEPTH_PROFILES: Readonly<Record<DepthPreset, DepthProfile>> = {
     depthRounds: 8, pageBudgetPerWorker: 15, pageBudgetPerGapWorker: 12, defaultContentLimit: 10_000,
     searchResultsPerQuery: 15, maxQueriesPerWorker: 6, maxPagesPerDomain: 6, maxLinksToEvaluate: 50,
     maxLinksToFollow: 8, maxOutlinksPerPage: 50, candidatePoolMultiplier: 3, workerConcurrency: 4,
-    maxDecompositionWorkers: 12, maxGapFillQueries: 8, ddgRateLimitMs: 1_500, minRelevanceScore: 0.08,
+    maxDecompositionWorkers: 12, maxGapFillQueries: 8, ddgRateLimitMs: 3_000, minRelevanceScore: 0.08,
     synthesisMaxSources: 40, synthesisSourceChars: 400, synthesisMaxTokens: 6_000, contradictionMaxSources: 25,
     stagnationThreshold: 2, searchPages: 2, searchLanes: 3, workerFanOut: 2,
     extraEngines: ["bing", "scholar", "brave", "searxng"], linkCrawlDepth: 2, queryMutationThreshold: 3,
@@ -79,7 +79,7 @@ export const DEPTH_PROFILES: Readonly<Record<DepthPreset, DepthProfile>> = {
     depthRounds: 12, pageBudgetPerWorker: 20, pageBudgetPerGapWorker: 15, defaultContentLimit: 12_000,
     searchResultsPerQuery: 18, maxQueriesPerWorker: 8, maxPagesPerDomain: 8, maxLinksToEvaluate: 60,
     maxLinksToFollow: 10, maxOutlinksPerPage: 60, candidatePoolMultiplier: 4, workerConcurrency: 5,
-    maxDecompositionWorkers: 14, maxGapFillQueries: 10, ddgRateLimitMs: 1_200, minRelevanceScore: 0.06,
+    maxDecompositionWorkers: 14, maxGapFillQueries: 10, ddgRateLimitMs: 3_000, minRelevanceScore: 0.06,
     synthesisMaxSources: 50, synthesisSourceChars: 300, synthesisMaxTokens: 8_000, contradictionMaxSources: 30,
     stagnationThreshold: 3, searchPages: 3, searchLanes: 4, workerFanOut: 3,
     extraEngines: ["bing", "scholar", "brave", "searxng"], linkCrawlDepth: 3, queryMutationThreshold: 4,
@@ -105,6 +105,10 @@ export const MAX_LINKS_TO_EVALUATE = 40;
 export const MAX_LINKS_TO_FOLLOW = 4;
 export const MIN_RELEVANCE_SCORE = 0.15;
 export const RELEVANCE_KEYWORD_FRACTION = 0.25;
+/** Minimum fraction of distinctive topic keywords that must match for a
+ * source to be accepted at all. Stops a single generic shared word (e.g.
+ * "evidence") from admitting off-topic pages. */
+export const RELEVANCE_KEYWORD_MIN_FRACTION = 0.6;
 export const RELEVANCE_TITLE_BONUS = 0.15;
 export const RELEVANCE_SNIPPET_BONUS = 0.08;
 export const FINGERPRINT_HEAD_WORDS = 30;
@@ -166,7 +170,7 @@ export const SEARCH_RESULTS_MIN = 1;
 export const SEARCH_RESULTS_MAX = 20;
 export const SEARCH_RESULTS_DEFAULT = 10;
 /** Hard safety cap on results fetched *per engine* from the extra/fallback engines. */
-export const EXTRA_ENGINE_MAX_RESULTS = 20;
+export const EXTRA_ENGINE_MAX_RESULTS = 24;
 
 export const SYSTEM_INSTRUCTIONS = `You are a core component of the Deep Swarm Research engine.
 Your goal is to provide precise, high-quality research planning, task decomposition, and findings synthesis.

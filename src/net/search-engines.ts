@@ -2,6 +2,8 @@
 import type { SearchHit } from "../types";
 import { DdgRateLimiter, searchDDG } from "./ddg";
 import { buildBrowserHeaders, fetchPage } from "./http";
+import { fetchWithWaterfall } from "./waterfallFetcher";
+import { fetchViaDecodo, isDecodoConfigured } from "./decodoApi";
 import { searchRssFeeds } from "./rss-engine";
 import { searchTelegram } from "./social-engines";
 import {
@@ -39,6 +41,7 @@ export interface SearchEngineOptions {
   readonly braveApiKey?: string;
   readonly rssFeedUrls?: ReadonlyArray<string>;
   readonly telegramChannels?: ReadonlyArray<string>;
+  readonly flaresolverrUrl?: string;
 }
 
 export type LimiterFactory = () => DdgRateLimiter;
@@ -144,9 +147,11 @@ const engineQueues: Record<string, EngineQueue> = {
   yandex: new EngineQueue(4000),
   youtube: new EngineQueue(3000),
   reference: new EngineQueue(2000),
+  serper: new EngineQueue(4000),
+  "brave-api": new EngineQueue(4000),
 };
 
-async function searchHtmlEndpoint(url: string, source: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
+async function searchHtmlEndpoint(url: string, source: string, maxResults: number, signal: AbortSignal, flaresolverrUrl?: string): Promise<ReadonlyArray<SearchHit>> {
   if (signal.aborted) throw new DOMException("Aborted", "AbortError");
   
   // Run the fetch inside the engine's specific queue
@@ -154,47 +159,100 @@ async function searchHtmlEndpoint(url: string, source: string, maxResults: numbe
   return queue.run(async () => {
     try {
       const response = await fetchPage(url, signal);
-      return parseSearchLinks(response.html, source, maxResults);
+      const directHits = parseSearchLinks(response.html, source, maxResults);
+      if (directHits.length > 0) return directHits;
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") throw error;
-      return [];
     }
+
+    // Tier A2: Decodo Web Scraping API — when the local egress cannot reach the
+    // engine's search host (TCP-blocked network), fetch the same search URL
+    // server-side through Decodo's proxy pool and parse it like a direct fetch.
+    if (isDecodoConfigured() && !signal.aborted) {
+      try {
+        const decodoHtml = await fetchViaDecodo(url, signal);
+        if (decodoHtml) {
+          const decodoHits = parseSearchLinks(decodoHtml, source, maxResults);
+          if (decodoHits.length > 0) return decodoHits;
+        }
+      } catch (decodoError: unknown) {
+        if (decodoError instanceof DOMException && decodoError.name === "AbortError") throw decodoError;
+        console.warn(`[${source} Tier A2] Decodo search fallback failed for "${url.slice(0, 80)}": ${decodoError instanceof Error ? decodoError.message : String(decodoError)}`);
+      }
+    }
+
+    // Tier B: FlareSolverr search fallback — many HTML engines (brave, google,
+    // bing, searxng, ...) WAF out bots. Rendering the same search URL in a
+    // headless browser via FlareSolverr sidesteps the challenge page. The result
+    // HTML is fed through the same parser, so engines remain interchangeable.
+    if (flaresolverrUrl && flaresolverrUrl.trim() !== "" && !signal.aborted) {
+      try {
+        const fsHtml = await fetchWithWaterfall(url, signal, flaresolverrUrl);
+        if (fsHtml) {
+          const fsHits = parseSearchLinks(fsHtml, source, maxResults);
+          if (fsHits.length > 0) return fsHits;
+        }
+      } catch (fsError: unknown) {
+        if (fsError instanceof DOMException && fsError.name === "AbortError") throw fsError;
+        console.warn(`[${source} Tier B] FlareSolverr search fallback failed for "${url.slice(0, 80)}": ${fsError instanceof Error ? fsError.message : String(fsError)}`);
+      }
+    }
+
+    return [];
   });
 }
 
-async function searchBrave(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
-  return searchHtmlEndpoint(`https://search.brave.com/search?q=${encodeURIComponent(query)}`, "brave", maxResults, signal);
+async function searchBrave(query: string, maxResults: number, signal: AbortSignal, flaresolverrUrl?: string): Promise<ReadonlyArray<SearchHit>> {
+  return searchHtmlEndpoint(`https://search.brave.com/search?q=${encodeURIComponent(query)}`, "brave", maxResults, signal, flaresolverrUrl);
 }
 
-async function searchGoogle(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
-  return searchHtmlEndpoint(`https://www.google.com/search?q=${encodeURIComponent(query)}&udm=14&hl=en&num=${maxResults}`, "google", maxResults, signal);
+async function searchGoogle(query: string, maxResults: number, signal: AbortSignal, flaresolverrUrl?: string): Promise<ReadonlyArray<SearchHit>> {
+  return searchHtmlEndpoint(`https://www.google.com/search?q=${encodeURIComponent(query)}&udm=14&hl=en&num=${maxResults}`, "google", maxResults, signal, flaresolverrUrl);
 }
 
-async function searchGoogleScholar(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
-  return searchHtmlEndpoint(`https://scholar.google.com/scholar?q=${encodeURIComponent(query)}`, "scholar", maxResults, signal);
+async function searchGoogleScholar(query: string, maxResults: number, signal: AbortSignal, flaresolverrUrl?: string): Promise<ReadonlyArray<SearchHit>> {
+  return searchHtmlEndpoint(`https://scholar.google.com/scholar?q=${encodeURIComponent(query)}`, "scholar", maxResults, signal, flaresolverrUrl);
 }
 
-async function searchSearxng(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
+async function searchSearxng(query: string, maxResults: number, signal: AbortSignal, flaresolverrUrl?: string): Promise<ReadonlyArray<SearchHit>> {
   const endpoints = [
     `https://searx.be/search?q=${encodeURIComponent(query)}&format=html`,
   ];
   for (const endpoint of endpoints) {
-    const hits = await searchHtmlEndpoint(endpoint, "searxng", maxResults, signal);
+    const hits = await searchHtmlEndpoint(endpoint, "searxng", maxResults, signal, flaresolverrUrl);
     if (hits.length > 0) return hits;
   }
   return [];
 }
 
-async function searchMojeek(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
-  return searchHtmlEndpoint(`https://www.mojeek.com/search?q=${encodeURIComponent(query)}`, "mojeek", maxResults, signal);
+async function searchMojeek(query: string, maxResults: number, signal: AbortSignal, flaresolverrUrl?: string): Promise<ReadonlyArray<SearchHit>> {
+  return searchHtmlEndpoint(`https://www.mojeek.com/search?q=${encodeURIComponent(query)}`, "mojeek", maxResults, signal, flaresolverrUrl);
 }
 
-async function searchYandex(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
-  return searchHtmlEndpoint(`https://yandex.com/search/?text=${encodeURIComponent(query)}`, "yandex", maxResults, signal);
+async function searchYandex(query: string, maxResults: number, signal: AbortSignal, flaresolverrUrl?: string): Promise<ReadonlyArray<SearchHit>> {
+  return searchHtmlEndpoint(`https://yandex.com/search/?text=${encodeURIComponent(query)}`, "yandex", maxResults, signal, flaresolverrUrl);
 }
 
 async function searchYouTube(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
   return searchInnerTube(query, maxResults, signal);
+}
+
+/** HTML-parse fallback used when a paid JSON API returns nothing. Runs the
+ * engine's public search page through the normal direct→Decodo→FlareSolverr
+ * tiers while keeping `source` so health/learning attribution stays correct. */
+async function apiFallbackViaHtml(
+  query: string,
+  maxResults: number,
+  signal: AbortSignal,
+  source: "serper" | "brave-api",
+  flaresolverrUrl?: string,
+): Promise<ReadonlyArray<SearchHit>> {
+  if (signal.aborted) return [];
+  const url =
+    source === "serper"
+      ? `https://www.google.com/search?q=${encodeURIComponent(query)}&udm=14&hl=en&num=${maxResults}`
+      : `https://search.brave.com/search?q=${encodeURIComponent(query)}`;
+  return searchHtmlEndpoint(url, source, maxResults, signal, flaresolverrUrl);
 }
 
 // Bing HTML results embed the real target as a base64 `u=` query param inside
@@ -215,22 +273,19 @@ function decodeBingTarget(href: string): string | null {
   }
 }
 
-async function searchBing(query: string, maxResults: number, signal: AbortSignal): Promise<ReadonlyArray<SearchHit>> {
+async function searchBing(query: string, maxResults: number, signal: AbortSignal, flaresolverrUrl?: string): Promise<ReadonlyArray<SearchHit>> {
   if (signal.aborted) throw new DOMException("Aborted", "AbortError");
   const queue = engineQueues["bing"] || new EngineQueue(4000);
   return queue.run(async () => {
-    try {
-      const response = await fetchPage(
-        `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${Math.min(maxResults, 20)}&setlang=en`,
-        signal,
-      );
+    const bingUrl = `https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${Math.min(maxResults, 20)}&setlang=en`;
+    const parse = (html: string): ReadonlyArray<SearchHit> => {
       const hits: SearchHit[] = [];
       const seen = new Set<string>();
       // Each result is a <li class="b_algo"> block with <h2><a href target>title</a></h2>
       // plus a <p class="b_lineclamp..."> snippet.
       const algoRe = /<li class="b_algo"[\s\S]*?<\/li>/gi;
       let match: RegExpExecArray | null;
-      while (hits.length < maxResults && (match = algoRe.exec(response.html)) !== null) {
+      while (hits.length < maxResults && (match = algoRe.exec(html)) !== null) {
         const block = match[0];
         const linkRe = /<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i;
         const lm = block.match(linkRe);
@@ -246,10 +301,46 @@ async function searchBing(query: string, maxResults: number, signal: AbortSignal
         hits.push({ url: real, title, snippet, discoveredBy: "bing" });
       }
       return dedupeHits(hits, maxResults);
+    };
+
+    try {
+      const response = await fetchPage(bingUrl, signal);
+      const directHits = parse(response.html);
+      if (directHits.length > 0) return directHits;
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") throw error;
-      return [];
     }
+
+    // Tier A2: Decodo Web Scraping API — fetch the same Bing SERP server-side
+    // when the local egress cannot reach www.bing.com (TCP-blocked network).
+    if (isDecodoConfigured() && !signal.aborted) {
+      try {
+        const decodoHtml = await fetchViaDecodo(bingUrl, signal);
+        if (decodoHtml) {
+          const decodoHits = parse(decodoHtml);
+          if (decodoHits.length > 0) return decodoHits;
+        }
+      } catch (decodoError: unknown) {
+        if (decodoError instanceof DOMException && decodoError.name === "AbortError") throw decodoError;
+        console.warn(`[bing Tier A2] Decodo search fallback failed for "${bingUrl.slice(0, 80)}": ${decodoError instanceof Error ? decodoError.message : String(decodoError)}`);
+      }
+    }
+
+    // Tier B: FlareSolverr search fallback (WAF bypass)
+    if (flaresolverrUrl && flaresolverrUrl.trim() !== "" && !signal.aborted) {
+      try {
+        const fsHtml = await fetchWithWaterfall(bingUrl, signal, flaresolverrUrl);
+        if (fsHtml) {
+          const fsHits = parse(fsHtml);
+          if (fsHits.length > 0) return fsHits;
+        }
+      } catch (fsError: unknown) {
+        if (fsError instanceof DOMException && fsError.name === "AbortError") throw fsError;
+        console.warn(`[bing Tier B] FlareSolverr search fallback failed for "${bingUrl.slice(0, 80)}": ${fsError instanceof Error ? fsError.message : String(fsError)}`);
+      }
+    }
+
+    return [];
   });
 }
 
@@ -352,6 +443,37 @@ export async function multiEngineSearch(
 ): Promise<ReadonlyArray<SearchHit>> {
   if (signal.aborted) throw new DOMException("Aborted", "AbortError");
 
+  let capTimer: NodeJS.Timeout | null = null;
+  const cap = new Promise<never>((_, reject) => {
+    capTimer = setTimeout(
+      () => reject(new Error(`Engine search cap exceeded (${MULTI_ENGINE_CAP_MS}ms) for "${query.slice(0, 60)}"`)),
+      MULTI_ENGINE_CAP_MS,
+    );
+    if (typeof capTimer.unref === "function") capTimer.unref();
+  });
+
+  try {
+    return await Promise.race([
+      multiEngineSearchInner(query, maxResults, engines, signal, limiterFactory, timeRange, options),
+      cap,
+    ]);
+  } finally {
+    if (capTimer) clearTimeout(capTimer);
+  }
+}
+
+/** Hard ceiling on one multi-engine round so a hung engine can't stall a worker. */
+const MULTI_ENGINE_CAP_MS = 30_000;
+
+async function multiEngineSearchInner(
+  query: string,
+  maxResults: number,
+  engines: ReadonlyArray<SearchEngine>,
+  signal: AbortSignal,
+  limiterFactory: LimiterFactory,
+  timeRange: string,
+  options: SearchEngineOptions,
+): Promise<ReadonlyArray<SearchHit>> {
   const selectedEngines = Array.from(new Set(engines.filter((engine): engine is SearchEngine => !!engine)));
   if (selectedEngines.length === 0 || maxResults <= 0) return [];
 
@@ -363,18 +485,28 @@ export async function multiEngineSearch(
         switch (engine) {
           case "ddg": {
             const limiter = limiterFactory();
-            return searchDDG(query, perEngineLimit, "moderate", signal, limiter, timeRange);
+            return searchDDG(query, perEngineLimit, "moderate", signal, limiter, timeRange, options.flaresolverrUrl);
           }
-          case "bing": return searchBing(query, perEngineLimit, signal);
-          case "brave": return searchBrave(query, perEngineLimit, signal);
-          case "google": return searchGoogle(query, perEngineLimit, signal);
-          case "scholar": return searchGoogleScholar(query, perEngineLimit, signal);
-          case "searxng": return searchSearxng(query, perEngineLimit, signal);
-          case "mojeek": return searchMojeek(query, perEngineLimit, signal);
-          case "yandex": return searchYandex(query, perEngineLimit, signal);
+          case "bing": return searchBing(query, perEngineLimit, signal, options.flaresolverrUrl);
+          case "brave": return searchBrave(query, perEngineLimit, signal, options.flaresolverrUrl);
+          case "google": return searchGoogle(query, perEngineLimit, signal, options.flaresolverrUrl);
+          case "scholar": return searchGoogleScholar(query, perEngineLimit, signal, options.flaresolverrUrl);
+          case "searxng": return searchSearxng(query, perEngineLimit, signal, options.flaresolverrUrl);
+          case "mojeek": return searchMojeek(query, perEngineLimit, signal, options.flaresolverrUrl);
+          case "yandex": return searchYandex(query, perEngineLimit, signal, options.flaresolverrUrl);
           case "youtube": return searchYouTube(query, perEngineLimit, signal);
-          case "serper": return options.serperApiKey ? searchSerper(query, perEngineLimit, options.serperApiKey, signal, limiterFactory()) : [];
-          case "brave-api": return options.braveApiKey ? searchBraveApi(query, perEngineLimit, options.braveApiKey, signal, limiterFactory()) : [];
+          case "serper": {
+            if (!options.serperApiKey) return [];
+            const apiHits = await searchSerper(query, perEngineLimit, options.serperApiKey, signal, limiterFactory());
+            if (apiHits.length > 0 || !isDecodoConfigured()) return apiHits;
+            return apiFallbackViaHtml(query, perEngineLimit, signal, "serper", options.flaresolverrUrl);
+          }
+          case "brave-api": {
+            if (!options.braveApiKey) return [];
+            const apiHits = await searchBraveApi(query, perEngineLimit, options.braveApiKey, signal, limiterFactory());
+            if (apiHits.length > 0 || !isDecodoConfigured()) return apiHits;
+            return apiFallbackViaHtml(query, perEngineLimit, signal, "brave-api", options.flaresolverrUrl);
+          }
           case "openalex": return searchOpenAlex(query, perEngineLimit, signal);
           case "crossref": return searchCrossref(query, perEngineLimit, signal);
           case "arxiv": return searchArxiv(query, perEngineLimit, signal);

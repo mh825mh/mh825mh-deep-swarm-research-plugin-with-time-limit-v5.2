@@ -145,6 +145,7 @@ export interface SwarmTask {
   readonly timeRange?: "all" | "year" | "month" | "week" | "day";
   readonly serperApiKey?: string;
   readonly braveApiKey?: string;
+  readonly decodoApiToken?: string;
   readonly flaresolverrUrl?: string;
   readonly rssFeedUrls?: ReadonlyArray<string>;
   readonly telegramChannels?: ReadonlyArray<string>;
@@ -311,6 +312,7 @@ export interface ResearchConfig {
   readonly enableReferenceSearch?: boolean;
   readonly serperApiKey?: string;
   readonly braveApiKey?: string;
+  readonly decodoApiToken?: string;
   readonly rssFeedUrls?: ReadonlyArray<string>;
   readonly telegramChannels?: ReadonlyArray<string>;
 

@@ -9,6 +9,7 @@ const KEYS_FILE = path.join(KEYS_DIR, "api-keys.json");
 export interface UserKeys {
   readonly serperApiKey?: string;
   readonly braveApiKey?: string;
+  readonly decodoApiToken?: string;
   readonly crossrefMailto?: string;
   readonly rssFeedUrls?: ReadonlyArray<string>;
   readonly telegramChannels?: ReadonlyArray<string>;
@@ -24,6 +25,7 @@ function ensureTemplate(): void {
         {
           serperApiKey: "",
           braveApiKey: "",
+          decodoApiToken: "",
           crossrefMailto: "",
           rssFeedUrls: [],
           telegramChannels: [],
@@ -62,6 +64,7 @@ export function loadUserKeys(): UserKeys {
     return {
       serperApiKey: cleanStr(parsed.serperApiKey),
       braveApiKey: cleanStr(parsed.braveApiKey),
+      decodoApiToken: cleanStr(parsed.decodoApiToken),
       crossrefMailto: cleanStr(parsed.crossrefMailto),
       rssFeedUrls: cleanArr(parsed.rssFeedUrls),
       telegramChannels: cleanArr(parsed.telegramChannels),

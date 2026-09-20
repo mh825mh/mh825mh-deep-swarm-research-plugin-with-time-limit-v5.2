@@ -27,6 +27,8 @@ import { detectContradictions } from "../synthesis/ai";
 import { SearchHealthTracker, EngineState } from "./health";
 import { LlmCallManager, askLoadedModel, hasLoadedModel } from "../utils/llm";
 import { getEngineStats, getLearnedHints } from "./learning";
+import { probeFlareSolverr, resetFsStats } from "../net/waterfallFetcher";
+import { resetDecodoSession, setDecodoToken, getDecodoStats } from "../net/decodoApi";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -500,7 +502,41 @@ export async function runSwarm(
   const health = new SearchHealthTracker();
   const llmManager = new LlmCallManager(cfg.llmCallMode ?? "standard", cfg.contextIsolation ?? "strict");
   resetArchiveSession();
+  resetFsStats();
+  resetDecodoSession();
+  setDecodoToken(cfg.decodoApiToken);
   const runStartedAt = Date.now();
+
+  // ==========================================
+  // FLARESOLVERR PRE-FLIGHT PROBE
+  // ==========================================
+  {
+    const fsUrl = cfg.flaresolverrUrl?.trim() ?? "";
+    if (fsUrl) {
+      fileStatus(`[FLARESOLVERR] Probing ${fsUrl} ...`);
+      const fs = await probeFlareSolverr(fsUrl, llmManager.signal);
+      if (fs.reachable) {
+        fileStatus(`[FLARESOLVERR] Reachable — Tier B (Cloudflare bypass) enabled for blocked pages.`);
+      } else {
+        fileWarn(`[FLARESOLVERR] Unreachable (${fs.probeError ?? "no response"}) — falling back to Wayback tier for blocked pages.`);
+      }
+    } else {
+      resetFsStats();
+      fileStatus(`[FLARESOLVERR] Not configured — anti-bot bypass disabled (falling back to Wayback).`);
+    }
+  }
+
+  // ==========================================
+  // DECODO PRE-FLIGHT
+  // ==========================================
+  {
+    const dd = getDecodoStats();
+    if (dd.configured) {
+      fileStatus(`[DECODO] Web Scraping API configured — server-side fetch tier enabled for TCP-blocked engines (e.g. DDG).`);
+    } else {
+      fileStatus(`[DECODO] Not configured — server-side fetch tier disabled.`);
+    }
+  }
 
   fileStatus(`\n🚀 DEEP RESEARCH SWARM LAUNCHED (Strict Priority Mode)\n`);
   fileStatus(`[RUN CONTROL] Budget: ${llmManager.budget.maxGlobalCalls} calls | Timeout: ${llmManager.budget.maxRuntimeMs / 60000}m | Isolation: ${llmManager.isolationMode}`);
@@ -670,11 +706,26 @@ export async function runSwarm(
       break;
     }
 
+    // Fragile HTML-scrape engines (bing, brave, google, scholar, searxng,
+    // mojeek, yandex, youtube) have per-engine health cooldowns, so the DIRECT
+    // layer fans out to every available free engine instead of just a couple.
+    const trackedEngines = new Set(["bing", "brave", "google", "scholar", "searxng", "mojeek", "yandex", "youtube"]);
+
     let layerEngines: string[] = [];
     if (layer === "DDG" && health.isDdgAvailable()) layerEngines = ["ddg"];
     else if (layer === "SEARXNG" && !health.isDdgAvailable()) layerEngines = ["searxng"];
-    else if (layer === "DIRECT") layerEngines = ["reference", "gdelt"];
-    else if (layer === "API" && health.canUseApi() && cfg.serperApiKey) layerEngines = ["serper"];
+    else if (layer === "DIRECT") {
+      const free = ["bing", "brave", "google", "scholar", "mojeek", "yandex", "youtube", "reference", "gdelt"];
+      layerEngines = free.filter(
+        (engine) => !trackedEngines.has(engine) || health.isOtherEngineAvailable(engine),
+      );
+    }
+    else if (layer === "API" && health.canUseApi() && (cfg.serperApiKey || cfg.braveApiKey)) {
+      const apiEngines: string[] = [];
+      if (cfg.serperApiKey) apiEngines.push("serper");
+      if (cfg.braveApiKey) apiEngines.push("brave-api");
+      layerEngines = apiEngines;
+    }
 
     if (layerEngines.length === 0) continue;
 
@@ -686,8 +737,10 @@ export async function runSwarm(
     aggregateResults(layerResults, allSources, allQueries, allErrors);
     const newSources = allSources.length - prevSourceCount;
 
+    // Mark gaps resolved for the report whenever a layer contributed sources,
+    // but do NOT clear the task list: later layers still get to run so we
+    // harvest results from every healthy engine set (bounded by crawlDeadline).
     if (newSources > 0) {
-      externalTasks = [];
       health.gaps.forEach(g => { g.resolved = true; });
     }
     if (layer === "API") health.apiCallsMade++;

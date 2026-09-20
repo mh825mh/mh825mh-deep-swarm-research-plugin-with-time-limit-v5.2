@@ -22,6 +22,7 @@ import {
   FINGERPRINT_TAIL_WORDS,
   RELEVANCE_TITLE_BONUS,
   RELEVANCE_SNIPPET_BONUS,
+  RELEVANCE_KEYWORD_MIN_FRACTION,
 } from "../constants";
 
 const virtualConsole = new VirtualConsole();
@@ -308,6 +309,12 @@ export function computeRelevance(
   // Count primary topic keyword occurrences
   const matchedKws = lowerKws.filter((kw) => lowerText.includes(kw));
   if (matchedKws.length === 0) return 0.0; // Immediate reject if zero core keywords match
+
+  // A single generic shared keyword (e.g. "evidence") must not admit an
+  // off-topic source. Require a minimum fraction of the distinctive keyword
+  // set to actually appear in the page body.
+  const required = Math.max(1, Math.ceil(lowerKws.length * RELEVANCE_KEYWORD_MIN_FRACTION));
+  if (matchedKws.length < required) return 0.0;
 
   let score = matchedKws.length / lowerKws.length;
 

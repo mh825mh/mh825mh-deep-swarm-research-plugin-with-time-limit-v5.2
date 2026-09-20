@@ -17,6 +17,7 @@ import {
   searchDDGPaginated,
   DdgRateLimiter,
   sharedDdgLimiter,
+  wasLastSearchRateLimited,
 } from "../net/ddg";
 import { multiEngineSearch, SearchEngine } from "../net/search-engines";
 import { SearchHealthTracker } from "./health";
@@ -125,6 +126,11 @@ const MUTATION_STRATEGIES: ReadonlyArray<(q: string) => string> = [
   (q) => q.replace(/\b(how|what|why|when)\b/gi, " ").trim(),
 ];
 
+/** Bound on the whole mutation phase for a single query (many of these
+ * strategies re-run DDG sequentially). Prevents a blocked engine from eating
+ * the entire watchdog budget inside one query. */
+const MUTATION_PHASE_CAP_MS = 30_000;
+
 type SearchHitLike = {
   url: string;
   title: string;
@@ -220,19 +226,20 @@ export async function runWorker(
         await sleep(humanDelay);
 
         if (task.searchPages > 1) {
-          ddgHits = await searchDDGPaginated(query, task.searchResultsPerQuery, task.searchPages, task.safeSearch, signal, limiter, task.timeRange ?? "all");
+          ddgHits = await searchDDGPaginated(query, task.searchResultsPerQuery, task.searchPages, task.safeSearch, signal, limiter, task.timeRange ?? "all", task.flaresolverrUrl);
         } else {
-          ddgHits = await searchDDG(query, task.searchResultsPerQuery, task.safeSearch, signal, limiter, task.timeRange ?? "all");
+          ddgHits = await searchDDG(query, task.searchResultsPerQuery, task.safeSearch, signal, limiter, task.timeRange ?? "all", task.flaresolverrUrl);
         }
 
         // LOWERED TRIPWIRE: If it finds even 1 result, that is a success.
         if (ddgHits.length === 0) {
-          throw new Error("INVALID_RESULT_SET (0 results)");
+          throw new Error(wasLastSearchRateLimited() ? "DDG_RATE_LIMITED (202)" : "INVALID_RESULT_SET (0 results)");
         }
 
         health.recordDdgSuccess(ddgHits.length);
         metrics.ddgHits += ddgHits.length;
         effectiveHitCount = ddgHits.length;
+        llmManager.recordProgress(); // Search activity is progress, not a stall.
         if (task.enableAdaptiveLearning !== false) getEngineStats().record("ddg", ddgHits.length);
 
         // Track Attribution
@@ -255,6 +262,7 @@ export async function runWorker(
         const msg = errorMessage(err);
         health.recordDdgFailure(msg);
         warn(`${roleTag} DDG failed (${health.ddg.consecutiveFailures}/5): ${msg}`);
+        llmManager.recordProgress(); // A capped, completed search attempt is not a hang.
         
         // Massive exponential backoff penalty if a block is detected (10-15 seconds)
         if (msg.includes("403") || msg.includes("Blocked")) {
@@ -299,15 +307,17 @@ export async function runWorker(
 
       let bestMutation: { query: string; hits: ReadonlyArray<SearchHit>; strategyIndex: number | null } | null = null;
       const baseline = mutationQuality(ddgHits, query);
+      const mutationDeadline = Date.now() + MUTATION_PHASE_CAP_MS;
 
       for (const { text: mutated, strategyIndex } of mutationsToTry) {
-        if (signal.aborted) break;
+        if (signal.aborted || Date.now() >= mutationDeadline) break;
         metrics.mutatedQueriesTried++;
         metrics.ddgQueries++;
 
         try {
-          const mutHits = await searchDDG(mutated, task.searchResultsPerQuery, task.safeSearch, signal, limiter, task.timeRange ?? "all");
+          const mutHits = await searchDDG(mutated, task.searchResultsPerQuery, task.safeSearch, signal, limiter, task.timeRange ?? "all", task.flaresolverrUrl);
           metrics.ddgHits += mutHits.length;
+          llmManager.recordProgress(); // Completed mutation searches are activity, not a stall.
 
           const improved = mutationQuality(mutHits, query) > baseline;
           if (strategyIndex !== null && task.enableAdaptiveLearning !== false) {
@@ -353,10 +363,11 @@ export async function runWorker(
                 Math.min(task.searchResultsPerQuery, EXTRA_ENGINE_MAX_RESULTS) * Math.max(1, usableEngines.length),
                 usableEngines,
                 signal, () => limiter, task.timeRange ?? "all",
-                { serperApiKey: (task as any).serperApiKey, braveApiKey: (task as any).braveApiKey, rssFeedUrls: (task as any).rssFeedUrls, telegramChannels: (task as any).telegramChannels }
+                { serperApiKey: (task as any).serperApiKey, braveApiKey: (task as any).braveApiKey, rssFeedUrls: (task as any).rssFeedUrls, telegramChannels: (task as any).telegramChannels, flaresolverrUrl: (task as any).flaresolverrUrl }
               );
               metrics.extraEngineHits += mutExtraHits.length;
               for (const h of mutExtraHits) allHits.push({ ...h, query: bestMutation.query });
+              llmManager.recordProgress(); // Completed mutation extra-engine search is not a stall.
               if (mutExtraHits.length > 0) status(`${roleTag} Mutation extra engines -> ${mutExtraHits.length} results`);
               for (const engine of usableEngines) {
                 if (!trackedEngines.has(engine)) continue;
@@ -385,6 +396,24 @@ export async function runWorker(
         const usableEngines = (task.extraEngines as ReadonlyArray<SearchEngine>).filter(
           (engine) => !trackedEngines.has(engine) || health.isOtherEngineAvailable(engine),
         );
+
+        // API-as-second-fallback: when the free engines under-deliver (blocked,
+        // rate-limited, or fewer than 60% of expected hits), lend serper/brave-api
+        // an attempt if a key is configured and the API budget is still available.
+        const freeResultsWeak = ddgBlocked || effectiveHitCount < Math.ceil(task.searchResultsPerQuery * 0.6);
+        if (freeResultsWeak && health.canUseApi()) {
+          const apiKeys = {
+            serper: (task as any).serperApiKey as string | undefined,
+            "brave-api": (task as any).braveApiKey as string | undefined,
+          };
+          for (const [engine, key] of Object.entries(apiKeys)) {
+            if (key && !usableEngines.includes(engine as SearchEngine)) {
+              usableEngines.push(engine as SearchEngine);
+              health.apiCallsMade++;
+            }
+          }
+        }
+
         if (usableEngines.length === 0) {
           warn(`${roleTag} All extra engines in cooldown, skipping extra-engine search.`);
         } else {
@@ -393,10 +422,11 @@ export async function runWorker(
             Math.min(task.searchResultsPerQuery, EXTRA_ENGINE_MAX_RESULTS) * Math.max(1, usableEngines.length),
             usableEngines,
             signal, () => limiter, task.timeRange ?? "all",
-            { serperApiKey: (task as any).serperApiKey, braveApiKey: (task as any).braveApiKey, rssFeedUrls: (task as any).rssFeedUrls, telegramChannels: (task as any).telegramChannels }
+            { serperApiKey: (task as any).serperApiKey, braveApiKey: (task as any).braveApiKey, rssFeedUrls: (task as any).rssFeedUrls, telegramChannels: (task as any).telegramChannels, flaresolverrUrl: (task as any).flaresolverrUrl }
           );
           metrics.extraEngineHits += extraHits.length;
           for (const h of extraHits) allHits.push({ ...h, query });
+          llmManager.recordProgress(); // Completed extra-engine search is activity, not a stall.
           if (extraHits.length > 0) status(`${roleTag} -> ${extraHits.length} extra results`);
 
           // Record per-engine outcomes for health gating (empty counts as a miss)

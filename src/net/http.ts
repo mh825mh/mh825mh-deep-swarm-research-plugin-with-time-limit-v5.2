@@ -54,6 +54,7 @@ export interface FetchResult {
   readonly finalUrl: string;
   readonly contentType?: string;
   readonly rawBuffer?: Buffer;
+  readonly statusCode?: number;
 }
 
 const FETCH_TIMEOUT_MS = 12000;
@@ -113,7 +114,7 @@ export async function fetchPage(
 
       if (contentType.includes("application/pdf") || contentType.includes("application/octet-stream")) {
         const arrayBuf = await res.arrayBuffer();
-        return { html: "", finalUrl, contentType, rawBuffer: Buffer.from(arrayBuf) };
+        return { html: "", finalUrl, contentType, rawBuffer: Buffer.from(arrayBuf), statusCode: res.status };
       }
 
       const html = await res.text();
@@ -123,7 +124,7 @@ export async function fetchPage(
         throw new Error("Captcha page detected");
       }
 
-      return { html, finalUrl, contentType };
+      return { html, finalUrl, contentType, statusCode: res.status };
     } catch (err: unknown) {
       if (err instanceof DOMException && err.name === "AbortError") throw err;
       lastError = err;
@@ -162,7 +163,7 @@ async function fetchFromArchives(url: string, signal: AbortSignal): Promise<Fetc
       if (res.ok) {
         const html = await res.text();
         if (html.length > 500) {
-          return { html, finalUrl: url, contentType: res.headers.get("content-type") || "" };
+          return { html, finalUrl: url, contentType: res.headers.get("content-type") || "", statusCode: res.status };
         }
       }
     } catch {}

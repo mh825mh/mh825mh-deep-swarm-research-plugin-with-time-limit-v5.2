@@ -27,6 +27,8 @@ import {
 import { sleep } from "./net/http";
 import { runDeepResearch } from "./researcher";
 import { loadUserKeys, keysFilePath } from "./config/keys";
+import { configSchematics } from "./config";
+import { setDecodoToken } from "./net/decodoApi";
 
 // Local type definition to satisfy `satisfies` keyword without breaking compilation
 type ToolCallResult = { error: boolean; output: string };
@@ -60,6 +62,7 @@ function readConfig(ctl: any) {
     enableLocalSources: false,                // NEW
     serperApiKey: undefined as string | undefined,
     braveApiKey: undefined as string | undefined,
+    decodoApiToken: undefined as string | undefined,
     cacheDuration: "30",
     contextBudgetMode: "auto",
     manualContextLimit: 8192,
@@ -74,7 +77,42 @@ function readConfig(ctl: any) {
       };
 
   try {
-    const raw = ctl?.getConfig?.() ?? ctl?.config ?? {};
+    // Read per-chat config via the official SDK accessor. Older/alternate runtime
+    // objects may expose `ctl.config`; fall back gracefully to either.
+    let raw: Record<string, unknown> = {};
+    try {
+      const parsed = ctl?.getPluginConfig?.(configSchematics);
+      if (parsed) {
+        raw = {
+          researchDepth: (parsed as any)?.get?.("researchDepth"),
+          contentLimitMode: (parsed as any)?.get?.("contentLimitMode"),
+          contentLimitPerPage: (parsed as any)?.get?.("contentLimitPerPage"),
+          searchResultsPerQuery: (parsed as any)?.get?.("searchResultsPerQuery"),
+          evidenceExcerptChars: (parsed as any)?.get?.("evidenceExcerptChars"),
+          enableAdaptiveLearning: (parsed as any)?.get?.("enableAdaptiveLearning"),
+          enableLinkFollowing: (parsed as any)?.get?.("enableLinkFollowing"),
+          enableAIPlanning: (parsed as any)?.get?.("enableAIPlanning"),
+          safeSearch: (parsed as any)?.get?.("safeSearch"),
+          timeRange: (parsed as any)?.get?.("timeRange"),
+          engineSelectionMode: (parsed as any)?.get?.("engineSelectionMode"),
+          maxSessionMinutes: (parsed as any)?.get?.("maxSessionMinutes"),
+          enableAcademicAPIs: (parsed as any)?.get?.("enableAcademicAPIs"),
+          enableYouTube: (parsed as any)?.get?.("enableYouTube"),
+          enableReferenceSearch: (parsed as any)?.get?.("enableReferenceSearch"),
+          enableLocalSources: (parsed as any)?.get?.("enableLocalSources"),
+          cacheDuration: (parsed as any)?.get?.("cacheDuration"),
+          contextBudgetMode: (parsed as any)?.get?.("contextBudgetMode"),
+          manualContextLimit: (parsed as any)?.get?.("manualContextLimit"),
+          maxSynthesisInputTokens: (parsed as any)?.get?.("maxSynthesisInputTokens"),
+          contextIsolation: (parsed as any)?.get?.("contextIsolation"),
+          llmCallMode: (parsed as any)?.get?.("llmCallMode"),
+          decodoApiToken: (parsed as any)?.get?.("decodoApiToken"),
+          flaresolverrUrl: (parsed as any)?.get?.("flaresolverrUrl"),
+        };
+      }
+    } catch {
+      raw = {};
+    }
     const cfg = { ...raw, ...(ctl?.config ?? {}) };
 
     const on = (v: unknown, def: boolean) =>
@@ -103,6 +141,12 @@ function readConfig(ctl: any) {
       (typeof cfg.braveApiKey === "string" && cfg.braveApiKey.trim()) ||
       process.env.BRAVE_API_KEY?.trim() ||
       fileKeys.braveApiKey ||
+      undefined;
+
+    const decodoToken =
+      (typeof cfg.decodoApiToken === "string" && cfg.decodoApiToken.trim()) ||
+      process.env.DECODO_API_TOKEN?.trim() ||
+      fileKeys.decodoApiToken ||
       undefined;
 
     
@@ -146,6 +190,7 @@ function readConfig(ctl: any) {
 
       serperApiKey: serperKey,
       braveApiKey: braveKey,
+      decodoApiToken: decodoToken,
 
       externalPluginTools: list(cfg.externalPluginTools),
 
@@ -283,6 +328,7 @@ const result = await runDeepResearch(
     enableReferenceSearch: ui.enableReferenceSearch,
     serperApiKey: ui.serperApiKey,
     braveApiKey: ui.braveApiKey,
+    decodoApiToken: ui.decodoApiToken,
     cacheDuration: ui.cacheDuration,
     contextBudgetMode: ui.contextBudgetMode,
     manualContextLimit: ui.manualContextLimit,
@@ -389,6 +435,7 @@ const researchSearchTool = tool({
     { status, warn, signal },
   ) => {
     const cfg = readConfig(ctl);
+    setDecodoToken(cfg.decodoApiToken);
     const max = maxResults ?? 8;
     const expand = (list: ReadonlyArray<string>): SearchEngine[] =>
       list.flatMap((e): SearchEngine[] =>

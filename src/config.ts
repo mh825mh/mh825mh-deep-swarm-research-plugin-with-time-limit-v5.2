@@ -333,6 +333,17 @@ export const configSchematics = createConfigSchematics()
   )
   // Add this right BEFORE the final .build()
   .field(
+    "decodoApiToken",
+    "string",
+    {
+      displayName: "Decodo Web Scraping API Token (Advanced)",
+      subtitle:
+        "Optional: Token from Dashboard → Web Scraping API → API Playground. " +
+        "Enables server-side fetching for networks that TCP-block search engines (e.g. DDG). Leave blank to disable.",
+    },
+    ""
+  )  
+  .field(
     "flaresolverrUrl",
     "string",
     {

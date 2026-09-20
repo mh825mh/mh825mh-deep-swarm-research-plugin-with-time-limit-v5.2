@@ -1,8 +1,19 @@
-# 🐝 Deep Research w/ Swarm Agent (v5.5.1)
+# 🐝 Deep Research w/ Swarm Agent (v5.6.0)
 
 
 
 Autonomous deep research for LM Studio. A swarm of specialized AI workers searches your local documents and the web, dynamically adapting its strategy, verifying claims, and synthesizing everything into a structured, confidence-scored report with auditable citations—all in one tool call.
+
+## 🚀 What's New in v5.6.0?
+
+* **Decodo Web Scraping API tier (server-side fetch):** a new optional fetch tier that resolves targets through Decodo's proxy pool (`scraper-api.decodo.com/v2/scrape`). This restores engines whose hosts are **TCP-blocked from the local network** (e.g. DuckDuckGo on this machine), without needing FlareSolverr's headless Chrome — which shares the same local egress and can't help there. Configure the token in plugin settings (`decodoApiToken`), via the `DECODO_API_TOKEN` environment variable, or in `~/.deep-swarm-research/api-keys.json`. When the direct tiers of any HTML engine fail (DDG, Bing, Brave, Google, Scholar, Mojeek, Yandex, SearXNG), the same search URL is fetched server-side and parsed as usual; the 200-call/run cap and auto-disable-after-5-failures keep it safe.
+* **API engines now fail over to Decodo:** if the Serper or Brave API returns zero results, the query falls back to the engine's public HTML search page through the direct→Decodo→FlareSolverr tiers — so a dead API key or quota no longer silently starves a query.
+* **DDG rate-limit hardening:** the DDG rate limiter now applies a **randomized jitter** (`minDelay × (1+rand)`) between queries instead of a fixed delay, and HTTP **202** responses (DDG's throttle signal) trigger a **shared exponential backoff** (8s → 16s → 32s → 64s → capped at 120s, ±15% jitter) honored by every lane, paginated page, and mutation query — the engine is never hammered again immediately. Baseline inter-query pacing was raised to ≥3s in every depth preset, and the health report tracks rate-limited (202) hits separately.
+* **DDG HTML-first ordering:** `html.duckduckgo.com/html/` is now the primary tier (parsed directly from HTML — no JS/vqd flow), with the Lite POST endpoint as the fallback; Decodo/FlareSolverr fallbacks use the same HTML layout and parser.
+* **Relevance gate fixed:** generic shared topic words ("evidence", "research", "analysis", …) no longer let off-topic pages (e.g. healthcare-real-world-evidence content) slip past the relevance filter. Topic keywords are now filtered against a generic-words list, and a page must match ≥60% of the remaining distinctive keywords to be admitted — fixing the "evidence about reincarnation" drift.
+* **Better free-engine coverage:** the DIRECT search layer now fans out to every healthy free engine (bing, brave, google, scholar, mojeek, yandex, youtube, reference, gdelt) instead of a fixed pair, and workers lend Serper/Brave API an attempt whenever free results come in weak (<60% of the query target) — so queries that one engine under-delivers on still get filled.
+* **FlareSolverr run-start probe:** the configured endpoint is connectivity-probed at run start (root, `/v1`, `/health` variants) and reported in the run health — no more silently skipping the bypass tier because the URL ended in `/v1`. Search-time FlareSolverr fallbacks were also wired into the Bing/Brave/Google/Scholar/Mojeek/Yandex/SearXNG HTML engines.
+* **Fetch status surfaced:** `FetchResult` now carries the HTTP `statusCode` so downstream tiers can react to statuses like 202 instead of guessing from the body.
 
 ## 🚀 What's New in v5.5.1?
 
@@ -126,6 +137,7 @@ Run the plugin once to auto-generate the keys file at:
 {
   "serperApiKey": "YOUR_SERPER_KEY",
   "braveApiKey": "YOUR_BRAVE_KEY",
+  "decodoApiToken": "YOUR_DECODO_TOKEN",
   "crossrefMailto": "you@example.com",
   "rssFeedUrls": ["https://feeds.bbci.co.uk/news/rss.xml"],
   "telegramChannels": ["channelname"]
@@ -133,6 +145,7 @@ Run the plugin once to auto-generate the keys file at:
 ```
 The optional `crossrefMailto` is used in the Crossref API User-Agent header (required by Crossref for polite pool access).
 The optional `rssFeedUrls` and `telegramChannels` enable RSS/Telegram mining as extra evidence sources during research.
+`decodoApiToken` enables the **Decodo Web Scraping API** server-side fetch tier — the fix for networks that TCP-block search hosts (e.g. DuckDuckGo). Get a token from [dashboard.decodo.com](https://dashboard.decodo.com) → Web Scraping API → API Playground. It can also be set via `~/.deep-swarm-research/api-keys.json`, the `DECODO_API_TOKEN` environment variable, or the plugin-settings field (precedence: plugin field → env → `api-keys.json`).
 
 **2. Local Document Sources (RAG)**
 
@@ -346,13 +359,15 @@ For organizations with large datalakes, the plugin searches in priority order:
  |
 | **Cache Duration**<br> | Days to reuse previously visited pages (default 30). 0 disables caching. |
 | **FlareSolverr URL**<br> | Advanced: Local endpoint for Cloudflare bypass (e.g., `[http://127.0.0.1:8191/v1](http://127.0.0.1:8191/v1)`).
-
+  |
+| **Decodo Web Scraping API Token**<br> | Advanced: Server-side fetch tier for engines TCP-blocked from your network (e.g. DDG). Get a token at `dashboard.decodo.com`. Leave blank to disable.
   |
 
 ---
 
 ## 📜 Changelog
 
+* **v5.6.0** - Decodo Web Scraping API server-side fetch tier (restores DDG on TCP-blocked networks; applied everywhere an HTML engine or the Serper/Brave APIs come up empty), DDG rate-limit hardening (randomized inter-query jitter, exponential backoff + jitter on HTTP 202, html.duckduckgo.com/html/ primary, ≥3s baseline pacing in every preset), relevance-gate fix (generic shared topic words filtered; ≥60% distinctive-keyword match required), free-engine fan-out in the DIRECT layer with API lending when results are weak, FlareSolverr run-start probe + search-fallback wiring across all HTML engines, and HTTP status surfaced on fetch results.
 * **v5.3.5** - SSRF guard hardened & unit-tested (internal/private IPs, DNS-rebinding, obfuscated addresses, `.local`/`.home.arpa`), archive-on-failure to the Wayback Machine with a local log, RSS & Telegram feed mining, run-health footer on every report, cache duration in days, archive fallback list pruned to resilient mirrors only, and a Vitest suite + GitHub Actions CI.
 * **v5.3.4** - Config wiring fix (Cache Duration, Context Budget, Isolation, LLM Call Budget, FlareSolverr, Crossref email now reach the run), active 2-minute stall watchdog with partial-result flush, session-time/LLM-budget cap alignment (`0 = unlimited`), DDG health threshold aligned to the 1-result tripwire, Waterfall fetcher wired into the live fetch path (got-scraping/FlareSolverr/Wayback), SDK-based query mutation (no hard-coded port), configurable Crossref User-Agent, ReadSkillFile tool registered, coverage-table marks, and duplicate-interface cleanup.
 * **v5.3.3** - Entity-first query planning, strict relevance pre-filtering, time-budget synthesis reservation, and claim strength verification.

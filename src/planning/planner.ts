@@ -525,12 +525,25 @@ const STOP_WORDS = new Set([
   "hypothetical", "scenarios", "lead",
 ]);
 
+// Words that appear across many unrelated topics. Keeping them as topic
+// keywords lets off-topic pages slip past the relevance gate (e.g. a topic
+// like "evidence about reincarnation" must not be satisfied by any page that
+// merely mentions "evidence"). Drop them so only distinctive terms remain.
+const GENERIC_TOPIC_WORDS = new Set([
+  "evidence", "research", "study", "studies", "analysis", "analyses",
+  "information", "findings", "data", "results", "result", "review", "reviews",
+  "role", "roles", "key", "impact", "effects", "effect", "implications",
+  "system", "systems", "about", "based", "related", "around", "overview",
+  "recent", "latest", "current", "future", "questions", "question", "issues",
+  "issue", "aspects", "nature", "types", "trends", "examples", "reasons",
+]);
+
 function extractKeywords(topic: string): ReadonlyArray<string> {
   return topic
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, "")
     .split(/\s+/)
-    .filter((w) => w.length > 2 && !STOP_WORDS.has(w))
+    .filter((w) => w.length > 2 && !STOP_WORDS.has(w) && !GENERIC_TOPIC_WORDS.has(w))
     .slice(0, 8);
 }
 

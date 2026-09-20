@@ -1,5 +1,8 @@
 // src/swarm/health.ts
 
+import { getFsStats } from "../net/waterfallFetcher";
+import { getDecodoStats } from "../net/decodoApi";
+
 export type EngineState = "HEALTHY" | "DEGRADED" | "TEMPORARILY_UNHEALTHY" | "DISABLED";
 
 export interface EngineHealth {
@@ -10,6 +13,7 @@ export interface EngineHealth {
   blocks: number;
   timeouts: number;     // <--- ADD THIS
   parserErrors: number; // <--- ADD THIS
+  rateLimited: number;
   consecutiveFailures: number;
   cooldownExpiry: number | null;
   lastFailureReason: string | null;
@@ -49,6 +53,7 @@ export class SearchHealthTracker {
       blocks: 0,
       timeouts: 0,
       parserErrors: 0,
+      rateLimited: 0,
       consecutiveFailures: 0,
       cooldownExpiry: null,
       lastFailureReason: null
@@ -87,6 +92,7 @@ export class SearchHealthTracker {
 
     if (reason.includes("timeout")) this.ddg.timeouts++;
     if (reason.includes("parser")) this.ddg.parserErrors++;
+    if (reason.includes("rate_limited") || reason.includes("202")) this.ddg.rateLimited++;
 
     if (this.ddg.consecutiveFailures >= 5) {
       this.ddg.state = "TEMPORARILY_UNHEALTHY";
@@ -151,6 +157,7 @@ DDG HEALTH
 - Searches attempted: ${this.ddg.searchesAttempted}
 - Valid results: ${this.ddg.validResults}
 - Blocks/challenges: ${this.ddg.blocks}
+- Rate-limited (202): ${this.ddg.rateLimited}
 - Consecutive failures: ${this.ddg.consecutiveFailures}
 - Cooldown expiry: ${this.ddg.cooldownExpiry ? new Date(this.ddg.cooldownExpiry).toISOString() : 'None'}
 - Last failure reason: ${this.ddg.lastFailureReason || 'None'}
@@ -171,6 +178,28 @@ API GAP FILLING
 QUERY QUALITY
 - Gaps generated: ${this.gaps.length}
 - Invalid gaps rejected: ${this.gaps.filter(g => !g.missingClaim).length}
+
+FLARESOLVERR HEALTH
+${(() => {
+  const fs = getFsStats();
+  const reachable = fs.reachable === null ? "NOT PROBED" : fs.reachable ? "YES" : "NO";
+  return [
+    `- Configured: ${fs.configured ? "YES" : "NO"}`,
+    `- Reachable: ${reachable}`,
+    `- Resolution attempts: ${fs.attempts} | Successful: ${fs.successes} | Failures: ${fs.failures}`,
+    `- Last descriptor: ${fs.probeError || "None"}`,
+  ].join("\n");
+})()}
+
+DECODO WEB SCRAPING API
+${(() => {
+  const dd = getDecodoStats();
+  return [
+    `- Configured: ${dd.configured ? "YES" : "NO"}`,
+    `- Server-side fetch attempts: ${dd.attempts} | Successful: ${dd.successes} | Failures: ${dd.failures}`,
+    `- Last error: ${dd.lastError || "None"}`,
+  ].join("\n");
+})()}
 
 ARCHIVE-ON-FAILURE
 - Pages archived to Wayback: ${this.pagesArchived}
