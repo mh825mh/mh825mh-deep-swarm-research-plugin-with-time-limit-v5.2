@@ -1,31 +1,47 @@
 // src/config.ts
 import { createConfigSchematics } from "@lmstudio/sdk";
 
-export const configSchematics = createConfigSchematics()
+/**
+ * Application-wide config (shared across all chats): secrets and machine-local
+ * infrastructure. Fields here are NOT part of the per-chat settings wall.
+ */
+export const globalConfigSchematics = createConfigSchematics()
   .field(
-    "timeRange",
-    "select",
+    "decodoApiToken",
+    "string",
     {
-      displayName: "Search Time Range",
-      subtitle: "Filter search results by publication date to ensure information freshness.",
-      options: [
-        { value: "all", displayName: "All time (default)" },
-        { value: "year", displayName: "Past year" },
-        { value: "month", displayName: "Past month" },
-        { value: "week", displayName: "Past week" },
-        { value: "day", displayName: "Past 24 hours" },
-      ],
+      displayName: "Decodo Web Scraping API Token",
+      subtitle:
+        "Optional: Server-side fetch tier for TCP-blocked engines (e.g. DDG). Blank disables.",
+      isProtected: true,
     },
-    "all",
+    "",
   )
+  .field(
+    "flaresolverrUrl",
+    "string",
+    {
+      displayName: "FlareSolverr URL",
+      subtitle:
+        "Optional: Local endpoint to bypass Cloudflare (e.g. http://127.0.0.1:8191/v1). Handled per-chat with web sandboxing.",
+    },
+    "",
+  )
+  .build();
+
+/**
+ * Per-chat config: only the controls a user is likely to change between
+ * research jobs. Advanced / infrastructure / rarely-touched knobs were removed
+ * from the schematic (their keys still work and default as described in the
+ * plugin changelog).
+ */
+export const configSchematics = createConfigSchematics()
   .field(
     "researchDepth",
     "select",
     {
       displayName: "Research Depth",
-      subtitle:
-        "Controls rounds, per-worker budgets, queries, and link-following aggressiveness. " +
-        "Sources are collected adaptively with no hard cap — deeper = more sources.",
+      subtitle: "Rounds and budgets; deeper = more sources.",
       options: [
         { value: "shallow", displayName: "Shallow — 1 round, ~10-25 sources, fast" },
         { value: "standard", displayName: "Standard — 3 rounds, ~30-60 sources (recommended)" },
@@ -37,144 +53,11 @@ export const configSchematics = createConfigSchematics()
     "standard",
   )
   .field(
-    "engineSelectionMode",
-    "select",
-    {
-      displayName: "Engine Selection Mode",
-      subtitle:
-        "Controls how search engines are chosen per worker. " +
-        "Adaptive: DDG first, fallbacks if weak. " +
-        "Benchmark: Run all engines to test performance. " +
-        "Priority: Use best engines from historical data.",
-      options: [
-        { value: "adaptive", displayName: "Adaptive (Default)" },
-        { value: "benchmark", displayName: "Benchmark (Run all)" },
-        { value: "priority", displayName: "Priority (Historical)" },
-      ],
-    },
-    "adaptive",
-  )
-  .field(
-    "cacheDuration",
-    "select",
-    {
-      displayName: "Persistent Cache Duration",
-      subtitle: "How long visited pages and extracted content are kept in the local cache.",
-      options: [
-        { value: "30", displayName: "30 Days" },
-        { value: "90", displayName: "90 Days" },
-        { value: "180", displayName: "6 Months" },
-        { value: "365", displayName: "12 Months" },
-        { value: "730", displayName: "24 Months" },
-      ],
-    },
-    "30",
-  )
-  .field(
-    "contentLimitMode",
-    "select",
-    {
-      displayName: "Content Budget Mode",
-      subtitle:
-        "Auto scales the per-page character budget with the Research Depth preset. " +
-        "Manual uses the 'Content Per Page' value below verbatim.",
-      options: [
-        { value: "auto", displayName: "Auto — scale with depth (recommended)" },
-        { value: "manual", displayName: "Manual — use value below" },
-      ],
-    },
-    "auto",
-  )
-  .field(
-    "contentLimitPerPage",
-    "numeric",
-    {
-      displayName: "Content Per Page (chars)",
-      subtitle:
-        "Characters extracted per source. Higher = richer but slower. " +
-        "Only applied when Content Budget Mode is Manual (1000-20000).",
-      min: 1000,
-      max: 20000,
-      int: true,
-      slider: { step: 1000, min: 1000, max: 20000 },
-    },
-    4000,
-  )
-  .field(
-    "searchResultsPerQuery",
-    "numeric",
-    {
-      displayName: "Results Per Query (override)",
-      subtitle:
-        "How many results to request from each search engine per query. " +
-        "0 = use the Research Depth preset (8-18). Higher = more sources, slower.",
-      min: 0,
-      max: 20,
-      int: true,
-      slider: { step: 1, min: 0, max: 20 },
-    },
-    0,
-  )
-  .field(
-    "evidenceExcerptChars",
-    "numeric",
-    {
-      displayName: "Evidence Excerpt Per Source (chars)",
-      subtitle:
-        "Characters of each source fed into the AI evidence ledger for the final synthesis. " +
-        "0 = use the Research Depth preset (300-1000). Higher = more detailed report.",
-      min: 0,
-      max: 2000,
-      int: true,
-      slider: { step: 100, min: 0, max: 2000 },
-    },
-    0,
-  )
-  .field(
-    "enableLinkFollowing",
-    "select",
-    {
-      displayName: "Link Following",
-      subtitle: "Workers follow relevant in-page links (like citations and references)",
-      options: [
-        { value: "on", displayName: "On — follow top links (recommended)" },
-        { value: "off", displayName: "Off — search results only" },
-      ],
-    },
-    "on",
-  )
-  .field(
-    "enableAIPlanning",
-    "select",
-    {
-      displayName: "AI Query Planning",
-      subtitle: "Use the loaded model for smarter queries, dynamic decomposition, and synthesis",
-      options: [
-        { value: "on", displayName: "On — AI-powered (best quality)" },
-        { value: "off", displayName: "Off — dimension-based fallback (faster start)" },
-      ],
-    },
-    "on",
-  )
-  .field(
-    "safeSearch",
-    "select",
-    {
-      displayName: "Safe Search",
-      options: [
-        { value: "strict", displayName: "Strict" },
-        { value: "moderate", displayName: "Moderate" },
-        { value: "off", displayName: "Off" },
-      ],
-    },
-    "moderate",
-  )
-  .field(
     "enableLocalSources",
     "select",
     {
       displayName: "Data Sources",
-      subtitle: "WARNING: Local RAG can consume your entire budget. Only enable if your prompt specifically asks about your internal documents.",
+      subtitle: "WARNING: Local RAG can consume your entire budget. Enable only for your internal documents.",
       options: [
         { value: "off", displayName: "Web only (Recommended)" },
         { value: "local", displayName: "Local documents only" },
@@ -189,9 +72,7 @@ export const configSchematics = createConfigSchematics()
     {
       displayName: "Max Session Time (minutes)",
       subtitle:
-        "Wall-clock cap for Deep Research runs. The effective limit is " +
-        "min(this value, the LLM Call Mode runtime cap: 10/20/30/45 min). " +
-        "Set to 0 for no session limit (crawling is unbounded; LLM calls stay capped by the mode).",
+        "Wall-clock cap per run (min of this and the LLM Call Mode runtime cap). 0 = no session limit.",
       min: 0,
       max: 240,
       int: true,
@@ -200,11 +81,53 @@ export const configSchematics = createConfigSchematics()
     30,
   )
   .field(
+    "enableAIPlanning",
+    "select",
+    {
+      displayName: "AI Query Planning",
+      subtitle: "Use the loaded model for smarter queries and synthesis",
+      options: [
+        { value: "on", displayName: "On — AI-powered (best quality)" },
+        { value: "off", displayName: "Off — dimension-based fallback (faster start)" },
+      ],
+    },
+    "on",
+  )
+  .field(
+    "enableLinkFollowing",
+    "select",
+    {
+      displayName: "Link Following",
+      subtitle: "Workers follow relevant in-page links (like citations)",
+      options: [
+        { value: "on", displayName: "On — follow top links (recommended)" },
+        { value: "off", displayName: "Off — search results only" },
+      ],
+    },
+    "on",
+  )
+  .field(
+    "timeRange",
+    "select",
+    {
+      displayName: "Search Time Range",
+      subtitle: "Filter results by publication date",
+      options: [
+        { value: "all", displayName: "All time (default)" },
+        { value: "year", displayName: "Past year" },
+        { value: "month", displayName: "Past month" },
+        { value: "week", displayName: "Past week" },
+        { value: "day", displayName: "Past 24 hours" },
+      ],
+    },
+    "all",
+  )
+  .field(
     "enableAcademicAPIs",
     "select",
     {
       displayName: "Academic APIs (OpenAlex, Crossref, arXiv)",
-      subtitle: "Query academic databases directly for papers and research.",
+      subtitle: "Query academic databases directly for papers",
       options: [
         { value: "on", displayName: "On" },
         { value: "off", displayName: "Off" },
@@ -217,7 +140,7 @@ export const configSchematics = createConfigSchematics()
     "select",
     {
       displayName: "YouTube Transcript Search",
-      subtitle: "Search YouTube and extract video transcripts as text sources.",
+      subtitle: "Search YouTube and extract video transcripts",
       options: [
         { value: "on", displayName: "On" },
         { value: "off", displayName: "Off" },
@@ -230,7 +153,7 @@ export const configSchematics = createConfigSchematics()
     "select",
     {
       displayName: "Encyclopedia Search",
-      subtitle: "Prioritize Grokipedia, Encyclopedia.com, and Britannica over Wikipedia.",
+      subtitle: "Prioritize Grokipedia, Encyclopedia.com, and Britannica over Wikipedia",
       options: [
         { value: "on", displayName: "On" },
         { value: "off", displayName: "Off" },
@@ -238,197 +161,20 @@ export const configSchematics = createConfigSchematics()
     },
     "on",
   )
-    .field(
-    "contextBudgetMode",
+  .field(
+    "cacheDuration",
     "select",
     {
-      displayName: "Context Budget Mode",
-      subtitle: "Controls how the plugin manages token limits for synthesis. Auto is recommended.",
+      displayName: "Persistent Cache Duration",
+      subtitle: "How long visited pages are kept in the local cache",
       options: [
-        { value: "auto", displayName: "Auto (Recommended)" },
-        { value: "conservative", displayName: "Conservative" },
-        { value: "manual", displayName: "Manual Override" },
+        { value: "30", displayName: "30 Days" },
+        { value: "90", displayName: "90 Days" },
+        { value: "180", displayName: "6 Months" },
+        { value: "365", displayName: "12 Months" },
+        { value: "730", displayName: "24 Months" },
       ],
     },
-    "auto",
-  )
-  .field(
-    "manualContextLimit",
-    "numeric",
-    {
-      displayName: "Manual Context Limit (Tokens)",
-      subtitle: "Only used if Mode is Manual. E.g., 8192, 16384, 32768.",
-      min: 2048,
-      max: 131072,
-      int: true,
-    },
-    8192,
-  )
-  .field(
-    "maxSynthesisInputTokens",
-    "numeric",
-    {
-      displayName: "Max Synthesis Input Tokens",
-      subtitle: "Hard cap on tokens sent to the model for final report generation.",
-      min: 2000,
-      max: 32000,
-      int: true,
-    },
-    18000,
-  )
-    .field(
-    "contextIsolation",
-    "select",
-    {
-      displayName: "LLM Context Isolation",
-      subtitle: "Controls how model context is managed. Strict isolation prevents context overflow and history bleed.",
-      options: [
-        { value: "strict", displayName: "Strict isolation (Recommended)" },
-        { value: "worker_reuse", displayName: "Reuse within one worker only" },
-        { value: "advanced_reuse", displayName: "Advanced reuse (Not recommended)" },
-      ],
-    },
-    "strict",
-  )
-  .field(
-    "llmCallMode",
-    "select",
-    {
-      displayName: "LLM Call Budget",
-      subtitle: "Hard limit on model calls to prevent infinite loops. Standard is highly recommended.",
-      options: [
-        { value: "compact", displayName: "Compact (Max 20 calls)" },
-        { value: "standard", displayName: "Standard (Max 45 calls)" },
-        { value: "deep", displayName: "Deep (Max 80 calls)" },
-        { value: "extended", displayName: "Extended (Max 120 calls)" },
-      ],
-    },
-    "standard",
-  )
-  .field(
-    "externalPluginTools",
-    "string",
-    {
-      displayName: "External Plugin Tools (Advanced)",
-      subtitle:
-        "Comma-separated identifiers of other enabled LM Studio plugins whose tools " +
-        "this plugin may call (e.g. lmstudio/rag-v1, dev/owner/plugin). Leave blank to disable.",
-    },
-    "",
-  )
-  .field(
-    "enableAdaptiveLearning",
-    "select",
-    {
-      displayName: "Adaptive Learning",
-      subtitle:
-        "Persist engine/mutation/domain performance across runs and reorder heuristics " +
-        "toward what has worked. Does not change model weights or plugin code.",
-      options: [
-        { value: "on", displayName: "On — learn from past runs (recommended)" },
-        { value: "off", displayName: "Off — stateless" },
-      ],
-    },
-    "on",
-  )
-  // Add this right BEFORE the final .build()
-  .field(
-    "decodoApiToken",
-    "string",
-    {
-      displayName: "Decodo Web Scraping API Token (Advanced)",
-      subtitle:
-        "Optional: Token from Dashboard → Web Scraping API → API Playground. " +
-        "Enables server-side fetching for networks that TCP-block search engines (e.g. DDG). Leave blank to disable.",
-    },
-    ""
-  )  
-  .field(
-    "flaresolverrUrl",
-    "string",
-    {
-      displayName: "FlareSolverr URL (Advanced)",
-      subtitle: "Optional: Local endpoint to bypass strict Cloudflare blocks (e.g., http://127.0.0.1:8191/v1). Leave blank to disable.",
-    },
-    ""
-  )
-  .field(
-    "allowedDomains",
-    "string",
-    {
-      displayName: "Allowed Domains (Advanced)",
-      subtitle:
-        "Comma-separated allow-list of root domains. When set, workers only crawl/search " +
-        "URLs whose host is this domain or a subdomain of it (e.g. arxiv.org). Leave blank to allow all.",
-    },
-    ""
-  )
-  .field(
-    "blockedDomains",
-    "string",
-    {
-      displayName: "Blocked Domains (Advanced)",
-      subtitle:
-        "Comma-separated deny-list of root domains. URLs on these hosts (or subdomains) are " +
-        "skipped and reported in the run's blocked_urls. Blocked wins over Allowed.",
-    },
-    ""
-  )
-  .field(
-    "maxPdfBytes",
-    "numeric",
-    {
-      displayName: "Max PDF Download Size (bytes)",
-      subtitle:
-        "Hard cap on bytes streamed per PDF before extraction. 0 = no cap. " +
-        "Prevents a single giant document from eating the whole crawl budget.",
-      min: 0,
-      max: 100000000,
-      int: true,
-    },
-    0,
-  )
-  .field(
-    "maxExternalToolCalls",
-    "numeric",
-    {
-      displayName: "Max External Plugin Tool Calls (per run)",
-      subtitle:
-        "Hard cap on 'Use Plugin Tool' invocations within one research run. 0 = unlimited.",
-      min: 0,
-      max: 200,
-      int: true,
-    },
-    0,
-  )
-  .field(
-    "requireApprovalForWrites",
-    "select",
-    {
-      displayName: "Require Approval Before Writes",
-      subtitle:
-        "When On, RAG write tools (Add/Update/Remove/Save/Load) and remote 'Use Plugin Tool' " +
-        "invocations require an explicit confirmed:true argument, so a model cannot silently " +
-        "modify your index or call write-capable external tools.",
-      options: [
-        { value: "on", displayName: "On — require confirmed:true" },
-        { value: "off", displayName: "Off — allow without confirmation" },
-      ],
-    },
-    "off",
-  )
-  .field(
-    "llmConcurrency",
-    "numeric",
-    {
-      displayName: "Concurrent LLM Calls",
-      subtitle:
-        "Parallel predictions bound globally with a semaphore (LM Studio usually serves one " +
-        "kv-cache slot, so 1 is the safe default). Worker crawling stays parallel regardless.",
-      min: 1,
-      max: 8,
-      int: true,
-    },
-    1,
+    "30",
   )
   .build();

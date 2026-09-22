@@ -5,11 +5,12 @@
 
 import "./polyfills";
 import { PluginContext, ChatMessage } from "@lmstudio/sdk";
-import { configSchematics } from "./config";
+import { configSchematics, globalConfigSchematics } from "./config";
 import { toolsProvider } from "./toolsProvider";
 
 export async function main(context: PluginContext): Promise<void> {
   context.withConfigSchematics(configSchematics);
+  context.withGlobalConfigSchematics(globalConfigSchematics);
   context.withToolsProvider(toolsProvider);
   context.withPromptPreprocessor(async (_ctl, userMessage) => {
     const now = new Date();

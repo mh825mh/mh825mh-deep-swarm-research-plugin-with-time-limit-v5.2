@@ -27,7 +27,7 @@ import {
 import { sleep } from "./net/http";
 import { runDeepResearch } from "./researcher";
 import { loadUserKeys, keysFilePath } from "./config/keys";
-import { configSchematics } from "./config";
+import { configSchematics, globalConfigSchematics } from "./config";
 import { setDecodoToken } from "./net/decodoApi";
 
 // Local type definition to satisfy `satisfies` keyword without breaking compilation
@@ -52,7 +52,7 @@ function readConfig(ctl: any) {
     enableAdaptiveLearning: true,
     enableLinkFollowing: true,
     enableAIPlanning: true,
-    safeSearch: "moderate",
+    safeSearch: "off",
     timeRange: "all",
     engineSelectionMode: "adaptive",
     maxSessionMinutes: 30,
@@ -82,6 +82,16 @@ function readConfig(ctl: any) {
     llmConcurrency: 1,
       };
 
+  const tryGet = (p: any, key: string): unknown => {
+    try {
+      return p?.get?.(key);
+    } catch {
+      // Key not present in this schematics (e.g. a field moved to global or
+      // intentionally removed from the per-chat UI). Treat as unset.
+      return undefined;
+    }
+  };
+
   try {
     // Read per-chat config via the official SDK accessor. Older/alternate runtime
     // objects may expose `ctl.config`; fall back gracefully to either.
@@ -90,41 +100,57 @@ function readConfig(ctl: any) {
       const parsed = ctl?.getPluginConfig?.(configSchematics);
       if (parsed) {
         raw = {
-          researchDepth: (parsed as any)?.get?.("researchDepth"),
-          contentLimitMode: (parsed as any)?.get?.("contentLimitMode"),
-          contentLimitPerPage: (parsed as any)?.get?.("contentLimitPerPage"),
-          searchResultsPerQuery: (parsed as any)?.get?.("searchResultsPerQuery"),
-          evidenceExcerptChars: (parsed as any)?.get?.("evidenceExcerptChars"),
-          enableAdaptiveLearning: (parsed as any)?.get?.("enableAdaptiveLearning"),
-          enableLinkFollowing: (parsed as any)?.get?.("enableLinkFollowing"),
-          enableAIPlanning: (parsed as any)?.get?.("enableAIPlanning"),
-          safeSearch: (parsed as any)?.get?.("safeSearch"),
-          timeRange: (parsed as any)?.get?.("timeRange"),
-          engineSelectionMode: (parsed as any)?.get?.("engineSelectionMode"),
-          maxSessionMinutes: (parsed as any)?.get?.("maxSessionMinutes"),
-          enableAcademicAPIs: (parsed as any)?.get?.("enableAcademicAPIs"),
-          enableYouTube: (parsed as any)?.get?.("enableYouTube"),
-          enableReferenceSearch: (parsed as any)?.get?.("enableReferenceSearch"),
-          enableLocalSources: (parsed as any)?.get?.("enableLocalSources"),
-          cacheDuration: (parsed as any)?.get?.("cacheDuration"),
-          contextBudgetMode: (parsed as any)?.get?.("contextBudgetMode"),
-          manualContextLimit: (parsed as any)?.get?.("manualContextLimit"),
-          maxSynthesisInputTokens: (parsed as any)?.get?.("maxSynthesisInputTokens"),
-          contextIsolation: (parsed as any)?.get?.("contextIsolation"),
-          llmCallMode: (parsed as any)?.get?.("llmCallMode"),
-          decodoApiToken: (parsed as any)?.get?.("decodoApiToken"),
-          flaresolverrUrl: (parsed as any)?.get?.("flaresolverrUrl"),
-          allowedDomains: (parsed as any)?.get?.("allowedDomains"),
-          blockedDomains: (parsed as any)?.get?.("blockedDomains"),
-          maxPdfBytes: (parsed as any)?.get?.("maxPdfBytes"),
-          maxExternalToolCalls: (parsed as any)?.get?.("maxExternalToolCalls"),
-          requireApprovalForWrites: (parsed as any)?.get?.("requireApprovalForWrites"),
-          llmConcurrency: (parsed as any)?.get?.("llmConcurrency"),
+          researchDepth: tryGet(parsed, "researchDepth"),
+          contentLimitMode: tryGet(parsed, "contentLimitMode"),
+          contentLimitPerPage: tryGet(parsed, "contentLimitPerPage"),
+          searchResultsPerQuery: tryGet(parsed, "searchResultsPerQuery"),
+          evidenceExcerptChars: tryGet(parsed, "evidenceExcerptChars"),
+          enableAdaptiveLearning: tryGet(parsed, "enableAdaptiveLearning"),
+          enableLinkFollowing: tryGet(parsed, "enableLinkFollowing"),
+          enableAIPlanning: tryGet(parsed, "enableAIPlanning"),
+          safeSearch: tryGet(parsed, "safeSearch"),
+          timeRange: tryGet(parsed, "timeRange"),
+          engineSelectionMode: tryGet(parsed, "engineSelectionMode"),
+          maxSessionMinutes: tryGet(parsed, "maxSessionMinutes"),
+          enableAcademicAPIs: tryGet(parsed, "enableAcademicAPIs"),
+          enableYouTube: tryGet(parsed, "enableYouTube"),
+          enableReferenceSearch: tryGet(parsed, "enableReferenceSearch"),
+          enableLocalSources: tryGet(parsed, "enableLocalSources"),
+          cacheDuration: tryGet(parsed, "cacheDuration"),
+          contextBudgetMode: tryGet(parsed, "contextBudgetMode"),
+          manualContextLimit: tryGet(parsed, "manualContextLimit"),
+          maxSynthesisInputTokens: tryGet(parsed, "maxSynthesisInputTokens"),
+          contextIsolation: tryGet(parsed, "contextIsolation"),
+          llmCallMode: tryGet(parsed, "llmCallMode"),
+          decodoApiToken: tryGet(parsed, "decodoApiToken"),
+          flaresolverrUrl: tryGet(parsed, "flaresolverrUrl"),
+          allowedDomains: tryGet(parsed, "allowedDomains"),
+          blockedDomains: tryGet(parsed, "blockedDomains"),
+          maxPdfBytes: tryGet(parsed, "maxPdfBytes"),
+          maxExternalToolCalls: tryGet(parsed, "maxExternalToolCalls"),
+          requireApprovalForWrites: tryGet(parsed, "requireApprovalForWrites"),
+          llmConcurrency: tryGet(parsed, "llmConcurrency"),
         };
       }
     } catch {
       raw = {};
     }
+
+    // Secrets / machine-local infra live in the application-wide global config.
+    // Fall back to any legacy per-chat value so tokens are not lost on upgrade.
+    let globalRaw: Record<string, unknown> = {};
+    try {
+      const gParsed = ctl?.getGlobalPluginConfig?.(globalConfigSchematics);
+      if (gParsed) {
+        globalRaw = {
+          decodoApiToken: tryGet(gParsed, "decodoApiToken"),
+          flaresolverrUrl: tryGet(gParsed, "flaresolverrUrl"),
+        };
+      }
+    } catch {
+      globalRaw = {};
+    }
+
     const cfg = { ...raw, ...(ctl?.config ?? {}) };
 
     const on = (v: unknown, def: boolean) =>
@@ -156,6 +182,7 @@ function readConfig(ctl: any) {
       undefined;
 
     const decodoToken =
+      (typeof globalRaw.decodoApiToken === "string" && globalRaw.decodoApiToken.trim()) ||
       (typeof cfg.decodoApiToken === "string" && cfg.decodoApiToken.trim()) ||
       process.env.DECODO_API_TOKEN?.trim() ||
       fileKeys.decodoApiToken ||
@@ -234,9 +261,11 @@ function readConfig(ctl: any) {
           : fallback.llmCallMode,
 
       flaresolverrUrl:
-        typeof cfg.flaresolverrUrl === "string" && cfg.flaresolverrUrl.trim()
-          ? cfg.flaresolverrUrl.trim()
-          : "",
+        typeof globalRaw.flaresolverrUrl === "string" && globalRaw.flaresolverrUrl.trim()
+          ? globalRaw.flaresolverrUrl.trim()
+          : typeof cfg.flaresolverrUrl === "string" && cfg.flaresolverrUrl.trim()
+            ? cfg.flaresolverrUrl.trim()
+            : "",
 
       crossrefMailto: fileKeys.crossrefMailto || "",
 

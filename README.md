@@ -1,4 +1,4 @@
-# 🐝 Deep Research w/ Swarm Agent (v5.8.0)
+# 🐝 Deep Research w/ Swarm Agent (v5.8.1)
 
 
 
@@ -397,6 +397,7 @@ For organizations with large datalakes, the plugin searches in priority order:
 
 ## 📜 Changelog
 
+* **v5.8.1** - Compact settings UI; Safe Search hidden, default off.
 * **v5.8.0** - Structured plans & verdicts: the AI planner now outputs a validated JSON plan (workers, open questions, stop conditions, estimated time, `index-only` citation policy, domain tags) via LM Studio structured output with a deterministic fallback, and the critic parses JSON verdict batches the same way. Shared blackboard makes the plan, open gaps, merged evidence cards, graded ledger, blocked URLs, and the live time budget visible to all workers. pass^k-lite: an independent citation verifier checks every `[n]` and URL against the ledger, one synthesis retry is allowed on failure, and the footer records citation pass / contradictions / retry / skill pack. Deterministic guardrails: domain allow/deny lists, per-PDF byte cap, per-run external-tool call budget, a `confirmed:true` human-approval gate before any RAG write or external tool call, and prompt-injection scrubbing of extracted page text. Skill packs ship as AGENTS.md-style packs (academic / policy / market) auto-selected from the planner's domain tags, with per-user overrides under `~/.deep-swarm-research/skills/`.
 * **v5.7.0** - Critic/verifier agent (evaluator-optimizer loop): dedicated non-searching critic grades every evidence card (on-topic, dated, primary/secondary, claim strength, contradicts ledger) via deterministic pre-score + budgeted LLM pass with heuristic fallback; only failing claims trigger one targeted ≤3-query retry round, incrementally re-graded against the accepted ledger; synthesis reads a critic-verified ledger (PASS cards only) and surfaces critic-flagged disagreements as severity-ranked contradiction entries.
 * **v5.6.0** - Decodo Web Scraping API server-side fetch tier (restores DDG on TCP-blocked networks; applied everywhere an HTML engine or the Serper/Brave APIs come up empty), DDG rate-limit hardening (randomized inter-query jitter, exponential backoff + jitter on HTTP 202, html.duckduckgo.com/html/ primary, ≥3s baseline pacing in every preset), relevance-gate fix (generic shared topic words filtered; ≥60% distinctive-keyword match required), free-engine fan-out in the DIRECT layer with API lending when results are weak, FlareSolverr run-start probe + search-fallback wiring across all HTML engines, and HTTP status surfaced on fetch results.
