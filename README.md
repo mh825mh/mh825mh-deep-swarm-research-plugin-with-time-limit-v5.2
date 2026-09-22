@@ -1,8 +1,17 @@
-# 🐝 Deep Research w/ Swarm Agent (v5.7.0)
+# 🐝 Deep Research w/ Swarm Agent (v5.8.0)
 
 
 
 Autonomous deep research for LM Studio. A swarm of specialized AI workers searches your local documents and the web, dynamically adapting its strategy, verifying claims, and synthesizing everything into a structured, confidence-scored report with auditable citations—all in one tool call.
+
+## 🚀 What's New in v5.8.0?
+
+* **Structured plans & verdicts (JSON schema):** the AI planner now emits a first-class JSON plan — specialized workers, open questions, stopping conditions, an estimated remaining-time budget, an `index-only` citation policy, and domain tags — validated against a zod schema and requested through LM Studio's native structured output (`jsonSchema`), with the deterministic planner as the fallback. The critic grades the same way: JSON verdict batches (on-topic, dated, nature, contradicts, claim strength, pass) come back schema-validated, and any non-JSON output drops back to the strict `CARD:` line format.
+* **Shared blackboard:** one coordination surface now carries the plan, the open gaps, the merged evidence cards, the critic-graded ledger, the blocked-list (URL + reason + hit count), and the live `time_left` budget. Workers and downstream readers all read from the same deterministic state — the orchestrator only assigns gaps and merges cards, it never writes report prose.
+* **Independent citation verifier (pass^k-lite):** after synthesis, a deterministic checker re-reads the markdown and confirms every `[n]` citation resolves to a graded ledger card **and** every URL equals a card's canonical URL (normalized for www/trailing-slash/fragment/case). If it fails, synthesis is retried **once**; the report footer records `Citation pass: PASS/FAIL`, contradictions, retry used, and the applied skill pack either way — invented URLs cannot survive the report.
+* **Deterministic guardrails:** new allow/deny domain lists (workers skip out-of-scope URLs and report them in `blocked_urls`), a per-PDF download byte cap, a per-run hard cap on `Use Plugin Tool` calls, a `Require Approval Before Writes` toggle that forces an explicit `confirmed: true` argument before any RAG write or external write-capable tool call, and prompt-injection scrubbing of extracted page text (directive-style lines, embedded base64/hex blobs) before it ever reaches the evidence/critic/synthesis pipeline.
+* **Skill packs (AGENTS.md-style):** three bundled domain packs — **academic**, **policy**, **market** — are auto-selected from the planner's domain tags and injected into the critic + synthesis prompts. Users can override any pack or add their own under `~/.deep-swarm-research/skills/` (override wins); the active pack+version is logged and shown in the footer.
+* **LLM concurrency control:** a global semaphore bounds parallel predictions (`llmConcurrency`, default 1 — one kv-cache slot), so the swarm's parallel crawling never fires more simultaneous predictions than LM Studio can safely multiplex.
 
 ## 🚀 What's New in v5.7.0?
 
@@ -174,6 +183,7 @@ Want the swarm to research your proprietary files alongside the web? Use the `RA
 
 
 * **ReadSkillFile:** Load a specialized formatting/domain skill file before synthesizing research.
+* **Skill packs (auto-applied):** bundled **academic / policy / market** AGENTS.md-style packs are auto-selected from the topic's domain tags and applied to the critic + synthesis prompts. Override or extend them under `~/.deep-swarm-research/skills/` (override wins). Add your own pack by dropping a Markdown file with frontmatter (`name`, `version`, `domains`) into that folder.
 
 
 
@@ -189,6 +199,8 @@ Want the swarm to research your proprietary files alongside the web? Use the `RA
 
 
 * **RAG Save / Load Index:** Persist the index to disk for instant access next session.
+
+  > When **Require Approval Before Writes** is On, the write tools (`RAG Add/Update/Remove/Save/Load`) and write-capable external plugin tools only run when the caller passes `confirmed: true` — treat it as an explicit "yes, I the user approve this change".
 
 
 
@@ -367,6 +379,18 @@ For organizations with large datalakes, the plugin searches in priority order:
 | **FlareSolverr URL**<br> | Advanced: Local endpoint for Cloudflare bypass (e.g., `[http://127.0.0.1:8191/v1](http://127.0.0.1:8191/v1)`).
   |
 | **Decodo Web Scraping API Token**<br> | Advanced: Server-side fetch tier for engines TCP-blocked from your network (e.g. DDG). Get a token at `dashboard.decodo.com`. Leave blank to disable.
+  |
+| **Allowed Domains**<br> | Advanced: comma-separated allow-list of root domains. When set, workers only crawl/search hosts on this domain (or subdomains, e.g. `arxiv.org`). Leave blank to allow all.
+  |
+| **Blocked Domains**<br> | Advanced: comma-separated deny-list of root domains. URLs on these hosts are skipped and reported in the run's `blocked_urls`. Blocked wins over Allowed.
+  |
+| **Max PDF Download Size**<br> | Advanced: hard byte cap per PDF before extraction (`0` = no cap) so a single giant document can't eat the crawl budget.
+  |
+| **Max External Plugin Tool Calls**<br> | Advanced: per-run cap on `Use Plugin Tool` invocations (`0` = unlimited).
+  |
+| **Require Approval Before Writes**<br> | When On, RAG write tools (Add/Update/Remove/Save/Load) and write-capable external plugin tools require an explicit `confirmed: true` argument, so the model can't silently modify your index or call write-capable tools.
+  |
+| **Concurrent LLM Calls**<br> | Parallel predictions allowed through the global semaphore (default `1`, LM Studio typically serves one kv-cache slot). Crawling stays parallel regardless.
   |
 
 ---
