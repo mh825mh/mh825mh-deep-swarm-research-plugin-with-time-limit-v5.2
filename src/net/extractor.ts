@@ -12,6 +12,7 @@ import { JSDOM, VirtualConsole } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import TurndownService from "turndown";
 import { ExtractedPage, Outlink } from "../types";
+import { stripInjection } from "./scrub";
 import {
   DESCRIPTION_FALLBACK_CHARS,
   MIN_READABILITY_TEXT_LEN,
@@ -224,7 +225,8 @@ function extractText(
         .trim();
 
       if (cleaned.length > MIN_READABILITY_TEXT_LEN) {
-        return { text: cleaned.slice(start, end), totalLength: cleaned.length };
+        const scrubbed = stripInjection(cleaned);
+        return { text: scrubbed.slice(start, end), totalLength: scrubbed.length };
       }
     }
   } catch {
@@ -245,7 +247,8 @@ function extractText(
     .replace(/\s+/g, " ")
     .trim();
 
-  return { text: stripped.slice(start, end), totalLength: stripped.length };
+  const scrubbed = stripInjection(stripped);
+  return { text: scrubbed.slice(start, end), totalLength: scrubbed.length };
 }
 
 function extractOutlinks(

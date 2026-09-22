@@ -10,14 +10,14 @@ import {
   CompiledReport,
   ReportSource,
   ContradictionEntry,
-  EvidenceCard,
-  ContextBudget,
-  EntityMetadata,
-  VerificationTier,
-  ClaimStrength // <--- ADD THIS
+  GradedEvidenceCard,
+  SkillPack,
 } from "../types";
 import { DIMENSIONS, detectCoveredDimensions } from "../planning/dimensions";
-import { synthesiseReport, detectContradictions } from "../synthesis/ai";
+import { synthesiseReport, detectContradictions, deriveContradictions } from "../synthesis/ai";
+import { verifyCitations } from "../synthesis/verify";
+import { buildEvidenceCards } from "../scoring/evidence";
+import { gradeCardFallback } from "../scoring/critic";
 import { StatusFn } from "../types";
 import { DepthProfile } from "../constants";
 import {
@@ -29,7 +29,6 @@ import {
   MAX_SOURCES_PER_DIMENSION,
   REPORT_SOURCE_PREVIEW_CHARS,
 } from "../constants";
-import { safeHostname } from "../net/http"; // <--- ADD THIS
 import { calculateContextBudget } from "../utils/tokens"; // <--- ADD THIS
 
 const INFO_MARKERS: ReadonlyArray<string> = [
@@ -198,7 +197,9 @@ export async function buildReport(
   profile?: DepthProfile,
   contextBudgetMode: "auto" | "conservative" | "manual" = "auto",
   manualContextLimit: number = 8192,
-  maxSynthesisInputTokens: number = 18000
+  maxSynthesisInputTokens: number = 18000,
+  gradedCards?: ReadonlyArray<GradedEvidenceCard>,
+  skill?: SkillPack,
 ): Promise<CompiledReport> {
   const now = new Date().toUTCString();
 
@@ -237,6 +238,8 @@ export async function buildReport(
 
   let aiSynthesis: string | null = null;
   let contradictions: ReadonlyArray<ContradictionEntry> = [];
+  let citationPass: boolean | undefined; // undefined = no critic graded the run
+  let retryUsed = false;
 
   if (enableAI && sources.length > 0) {
     const defaultProfile: DepthProfile = {
@@ -272,78 +275,91 @@ export async function buildReport(
     };
     const p = profile ?? defaultProfile;
 
-    
-     // Inside buildReport() mapping evidence cards:
-    const excerptChars = Math.max(200, p.evidenceExcerptChars || 300);
-    const claimChars = Math.min(300, Math.round(excerptChars * 0.4));
-    const evidence: EvidenceCard[] = sources.map((s, i) => {
-      const domain = safeHostname(s.url);
-      const isOfficial = s.domainScore >= 90;
-      
-      // Determine claim strength classification
-      let claimStrength: ClaimStrength = "speculation";
-      const lower = s.text.toLowerCase();
-      if (s.tier === "academic" || isOfficial) {
-        claimStrength = lower.includes("peer-reviewed") || lower.includes("controlled study") ? "documented" : "disputed";
-      } else if (lower.includes("interview") || lower.includes("case study") || lower.includes("account")) {
-        claimStrength = "anecdote";
-      }
-
-      const metadataConfidence = isOfficial ? 1.0 : 0.6;
-      const topicFit = s.relevanceScore;
-      const recommendationStrength = (metadataConfidence * 0.4) + (topicFit * 0.6);
-
-      let tier: VerificationTier = "C";
-      if (isOfficial && recommendationStrength > 0.7) tier = "A";
-      else if (recommendationStrength > 0.45) tier = "B";
-      if (s.relevanceScore < 0.25) tier = "REJECTED";
-
-      return {
-        id: `E${i+1}`,
-        entityType: s.tier === "academic" ? "article" : s.origin === "local" ? "local document" : "web",
-        title: s.title,
-        authorOrHost: domain,
-        canonicalUrl: s.url,
-        sourceTier: s.tier,
-        relevantClaim: s.description || s.text.slice(0, claimChars),
-        supportingExcerpt: s.text.slice(0, excerptChars).replace(/\n+/g, " ").trim(),
-        confidence: s.relevanceScore > 0.6 ? "High" : s.relevanceScore > 0.35 ? "Medium" : "Low",
-        claimStrength,
-        freshness: s.published,
-        worker: s.workerLabel,
-        verificationTier: tier,
-        metadataConfidence,
-        topicFit,
-        recommendationStrength,
-        entityMetadata: { publisher: domain, officialUrl: s.url },
-      };
-    });
-
-       // Filter out REJECTED evidence before synthesis
-    const validEvidence = evidence.filter(e => e.verificationTier !== "REJECTED");
-
     const budget = calculateContextBudget(
       contextBudgetMode,
       manualContextLimit,
       maxSynthesisInputTokens
     );
 
-    const [synthResult, contradResult] = await Promise.all([
-      synthesiseReport(
-        topic,
-        validEvidence,
-        coveredLabels,
-        gapLabels,
-        status,
-        budget
-      ).catch(() => null),
-      detectContradictions(topic, sources, status, p).catch(
-        () => [] as ContradictionEntry[],
-      ),
-    ]);
+    if (gradedCards && gradedCards.length > 0) {
+      // CRITIC-GRADED LEDGER PATH: the swarm already ran the critic/verifier
+      // worker, so synthesis consumes only the graded pass cards and the
+      // contradiction section is derived from the critic verdicts — never raw
+      // worker prose.
+      const validEvidence = gradedCards.filter((e) => e.critic.pass);
+      const [synthResult, contradResult] = await Promise.all([
+        synthesiseReport(
+          topic,
+          validEvidence,
+          coveredLabels,
+          gapLabels,
+          status,
+          budget,
+          skill,
+        ).catch(() => null),
+        Promise.resolve(deriveContradictions(gradedCards)),
+      ]);
 
-    aiSynthesis = synthResult;
-    contradictions = contradResult;
+      // item 6+: independent citation verifier. Every [n] must map to a ledger
+      // card and every URL must equal a card's canonical URL. One automatic
+      // re-synthesis retry is allowed before the report is emitted; the footer
+      // records the verdict either way.
+      let verified = synthResult
+        ? verifyCitations(synthResult, validEvidence)
+        : null;
+      let didRetry = false;
+
+      if (synthResult && verified && !verified.pass) {
+        didRetry = true;
+        status(
+          `Citation check FAILED (orphans: ${verified.orphanIndices.join(", ") || "none"}, foreign URLs: ${verified.foreignUrls.join(", ") || "none"}) — retrying synthesis once…`,
+        );
+        const retried = await synthesiseReport(
+          topic,
+          validEvidence,
+          coveredLabels,
+          gapLabels,
+          status,
+          budget,
+          skill,
+        ).catch(() => null);
+        if (retried) {
+          aiSynthesis = retried;
+          verified = verifyCitations(retried, validEvidence);
+        }
+      }
+
+      aiSynthesis = aiSynthesis ?? synthResult;
+      contradictions = contradResult;
+      citationPass = verified?.pass ?? false;
+      retryUsed = didRetry;
+    } else {
+      // FALLBACK PATH (no critic ran — e.g. no LLM budget): deterministic
+      // evidence cards + the classic contradiction scan. Cards get a
+      // heuristic-only verdict so downstream code always sees a graded ledger.
+      const evidence = buildEvidenceCards(crawled, p);
+      const validEvidence = evidence
+        .filter((e) => e.verificationTier !== "REJECTED")
+        .map((e) => gradeCardFallback(e, keywords));
+
+      const [synthResult, contradResult] = await Promise.all([
+        synthesiseReport(
+          topic,
+          validEvidence,
+          coveredLabels,
+          gapLabels,
+          status,
+          budget,
+          skill,
+        ).catch(() => null),
+        detectContradictions(topic, sources, status, p).catch(
+          () => [] as ContradictionEntry[],
+        ),
+      ]);
+
+      aiSynthesis = synthResult;
+      contradictions = contradResult;
+    }
   } // <--- This brace closes the "if (enableAI && sources.length > 0)" block
 
   const header = buildHeader(
@@ -397,6 +413,10 @@ export async function buildReport(
     gapDims: gapIds,
     aiSynthesis: aiSynthesis ?? undefined,
     contradictions,
+    citationPass,
+    retryUsed,
+    contradictionCount: contradictions.length,
+    skillUsed: skill ? `${skill.name} v${skill.version}${skill.userOverride ? " (user override)" : ""}` : undefined,
   };
 }
 

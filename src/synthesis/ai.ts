@@ -1,17 +1,29 @@
 // src/synthesis/ai.ts
 import { LMStudioClient } from "@lmstudio/sdk";
-import { ReportSource, ContradictionEntry, StatusFn, EvidenceCard, ContextBudget } from "../types";
+import { ReportSource, ContradictionEntry, StatusFn, EvidenceCard, GradedEvidenceCard, ContextBudget, SkillPack } from "../types";
 import { logLlmDiagnostics, estimateTokens, preflightSynthesis } from "../utils/tokens";
 import {
   DepthProfile,
   AI_SYNTHESIS_TEMPERATURE,
   AI_SYNTHESIS_TIMEOUT_MS,
   CONTRADICTION_SOURCE_CHARS,
+  CONTRADICTION_MAX_SOURCES,
   SYSTEM_INSTRUCTIONS,
 } from "../constants";
 
+function renderVerdict(card: GradedEvidenceCard): string {
+  const c = card.critic;
+  const parts = [
+    c.onTopic ? "on-topic" : "OFF-TOPIC",
+    `dated:${c.dated}`,
+    c.sourceNature,
+    c.contradicts.length > 0 ? `conflicts:${c.contradicts.join(",")}` : "no-conflicts",
+  ];
+  return parts.join(" | ");
+}
+
 function prepareEvidenceLedger(
-  evidence: ReadonlyArray<EvidenceCard>,
+  evidence: ReadonlyArray<GradedEvidenceCard>,
   maxTokens: number
 ): string {
   const sorted = [...evidence].sort((a, b) => {
@@ -24,8 +36,9 @@ function prepareEvidenceLedger(
   const tokenLimit = maxTokens - 1000;
 
   for (const card of sorted) {
-    const entry = `[${card.id}] (${card.entityType}) ${card.title} - ${card.authorOrHost}\nURL: ${card.canonicalUrl}\nTier: ${card.sourceTier} | Confidence: ${card.confidence} | Freshness: ${card.freshness ?? "Unknown"}\nClaim: ${card.relevantClaim}\nExcerpt: "${card.supportingExcerpt}"`;
-    
+    if (!card.critic.pass) continue;
+    const entry = `[${card.id}] (${card.entityType}) ${card.title} - ${card.authorOrHost}\nURL: ${card.canonicalUrl}\nTier: ${card.sourceTier} | Confidence: ${card.confidence} | Freshness: ${card.freshness ?? "Unknown"}\nCRITIC: ${renderVerdict(card)}\nClaim: ${card.relevantClaim}\nExcerpt: "${card.supportingExcerpt}"`;
+
     const entryTokens = estimateTokens(entry);
     if (currentTokens + entryTokens > tokenLimit) break;
 
@@ -38,24 +51,29 @@ function prepareEvidenceLedger(
 
 export async function synthesiseReport(
   topic: string,
-  evidence: ReadonlyArray<EvidenceCard>,
+  evidence: ReadonlyArray<GradedEvidenceCard>,
   coveredClaims: ReadonlyArray<string>,
   gapClaims: ReadonlyArray<string>,
   status: StatusFn,
   budget: ContextBudget,
+  skill?: SkillPack,
 ): Promise<string | null> {
   if (evidence.length === 0) return null;
 
   status(`AI synthesis - preparing evidence ledger (${evidence.length} cards, budget: ${budget.maxSynthesisInput} tokens)…`);
 
   const evidenceBlock = prepareEvidenceLedger(evidence, budget.maxSynthesisInput);
-  
+
+  const skillBlock = skill
+    ? `\nSKILL PACK APPLIED — "${skill.name}" v${skill.version} (auto-selected from topic domain tags). Follow its conventions for this topic:\n${skill.content}\n`
+    : "";
+
   const prompt = `You are an expert research analyst. Write a comprehensive, well-structured narrative synthesis of these research findings.
 
 TOPIC: "${topic}"
 CLAIMS COVERED: ${coveredClaims.join(", ")}
-
-EVIDENCE LEDGER (Tier A & B only):
+${skillBlock}
+EVIDENCE LEDGER (CRITIC-VERIFIED, PASS cards only — every card was graded on-topic and checked against the accepted ledger for contradictions):
  ${evidenceBlock}
 
 STRICT OUTPUT RULES:
@@ -64,7 +82,8 @@ STRICT OUTPUT RULES:
 3. NO ORPHAN METRICS: Do not include ANY percentages, statistics, or metrics unless they are explicitly written verbatim in the provided Evidence Ledger. If you cannot point to the exact excerpt, DROP the statistic.
 4. TAXONOMY SEPARATION: Keep documented field investigations, anecdotal accounts, and philosophical doctrine in separate sections. Do not conflate them.
 5. NO HALLUCINATED NAMES: You may only cite authors, researchers, and institutions explicitly listed in the Evidence Ledger.
-6. REFERENCE APPENDIX: Conclude the report with a strict Markdown table titled "Reference Appendix" mapping each [Index] to its Canonical URL and Author/Host.
+6. NO INVENTED URLS: Citations are keys into the ledger. Every [Index] must match a ledger card, and every URL you write must be the card's exact Canonical URL.
+7. REFERENCE APPENDIX: Conclude the report with a strict Markdown table titled "Reference Appendix" mapping each [Index] to its Canonical URL and Author/Host.
 
 SYNTHESIS:`;
 
@@ -113,6 +132,63 @@ SYNTHESIS:`;
     status(`AI synthesis failed: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
+}
+
+/**
+ * Maps the critic's per-card "contradicts" verdicts into the report's
+ * ContradictionEntry shape. Card ids are `E<k>` where k is the 1-based index of
+ * the source in the final crawled array, so they line up with the citation
+ * index rendered in the report.
+ */
+export function deriveContradictions(
+  graded: ReadonlyArray<GradedEvidenceCard>,
+): ReadonlyArray<ContradictionEntry> {
+  const byId = new Map(graded.map((c) => [c.id, c]));
+  const indexOf = (card: GradedEvidenceCard): number => {
+    const m = /^E(\d+)$/.exec(card.id);
+    return m ? parseInt(m[1], 10) : 0;
+  };
+  const emitted = new Set<string>();
+  const entries: ContradictionEntry[] = [];
+
+  for (const card of graded) {
+    for (const otherId of card.critic.contradicts) {
+      const other = byId.get(otherId);
+      if (!other || other.id === card.id) continue;
+      const key = [card.id, otherId].sort().join("<->");
+      if (emitted.has(key)) continue;
+      emitted.add(key);
+
+      const severity =
+        card.critic.claimStrength === "documented" ||
+        other.critic.claimStrength === "documented"
+          ? "major"
+          : card.critic.claimStrength === "disputed" ||
+              other.critic.claimStrength === "disputed"
+            ? "moderate"
+            : "minor";
+
+      entries.push({
+        claim: card.relevantClaim.slice(0, 220),
+        sourceA: {
+          index: indexOf(card),
+          title: card.title,
+          stance: `${card.critic.claimStrength}${card.critic.pass ? "" : " — flagged by critic"}`,
+        },
+        sourceB: {
+          index: indexOf(other),
+          title: other.title,
+          stance: `${other.critic.claimStrength}${other.critic.pass ? "" : " — flagged by critic"}`,
+        },
+        severity,
+      });
+
+      if (entries.length >= CONTRADICTION_MAX_SOURCES) break;
+    }
+    if (entries.length >= CONTRADICTION_MAX_SOURCES) break;
+  }
+
+  return entries;
 }
 
 export async function detectContradictions(

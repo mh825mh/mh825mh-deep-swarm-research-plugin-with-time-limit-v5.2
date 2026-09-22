@@ -74,6 +74,12 @@ function readConfig(ctl: any) {
     rssFeedUrls: [] as string[],
     telegramChannels: [] as string[],
     externalPluginTools: [] as string[],
+    allowedDomains: [] as string[],
+    blockedDomains: [] as string[],
+    maxPdfBytes: 0,
+    maxExternalToolCalls: 0,
+    requireApprovalForWrites: false,
+    llmConcurrency: 1,
       };
 
   try {
@@ -108,6 +114,12 @@ function readConfig(ctl: any) {
           llmCallMode: (parsed as any)?.get?.("llmCallMode"),
           decodoApiToken: (parsed as any)?.get?.("decodoApiToken"),
           flaresolverrUrl: (parsed as any)?.get?.("flaresolverrUrl"),
+          allowedDomains: (parsed as any)?.get?.("allowedDomains"),
+          blockedDomains: (parsed as any)?.get?.("blockedDomains"),
+          maxPdfBytes: (parsed as any)?.get?.("maxPdfBytes"),
+          maxExternalToolCalls: (parsed as any)?.get?.("maxExternalToolCalls"),
+          requireApprovalForWrites: (parsed as any)?.get?.("requireApprovalForWrites"),
+          llmConcurrency: (parsed as any)?.get?.("llmConcurrency"),
         };
       }
     } catch {
@@ -230,11 +242,58 @@ function readConfig(ctl: any) {
 
       rssFeedUrls: list(cfg.rssFeedUrls).length > 0 ? list(cfg.rssFeedUrls) : fileKeys.rssFeedUrls || [],
       telegramChannels: list(cfg.telegramChannels).length > 0 ? list(cfg.telegramChannels) : fileKeys.telegramChannels || [],
+
+      allowedDomains: list(cfg.allowedDomains),
+      blockedDomains: list(cfg.blockedDomains),
+      maxPdfBytes: Math.max(0, Number(cfg.maxPdfBytes ?? fallback.maxPdfBytes)),
+      maxExternalToolCalls: Math.max(0, Number(cfg.maxExternalToolCalls ?? fallback.maxExternalToolCalls)),
+      requireApprovalForWrites: on(cfg.requireApprovalForWrites, fallback.requireApprovalForWrites),
+      llmConcurrency: Math.max(1, Math.min(8, Number(cfg.llmConcurrency ?? fallback.llmConcurrency))),
     };
   } catch {
     return fallback;
   }
 }
+
+// item 7: per-run guardrails — human-approval gate for write-capable operations
+// and a hard cap on cross-plugin tool invocations. Reset each research run.
+type RunGuardrails = {
+  requireApprovalForWrites: boolean;
+  maxExternalToolCalls: number;
+  externalToolCallsUsed: number;
+};
+
+let runGuardrails: RunGuardrails = {
+  requireApprovalForWrites: false,
+  maxExternalToolCalls: 0,
+  externalToolCallsUsed: 0,
+};
+
+function resetRunGuardrails(ui: ReturnType<typeof readConfig>) {
+  runGuardrails = {
+    requireApprovalForWrites: ui.requireApprovalForWrites,
+    maxExternalToolCalls: ui.maxExternalToolCalls,
+    externalToolCallsUsed: 0,
+  };
+}
+
+/** Returns an error message when the write is blocked, else null. */
+function checkWriteApproval(confirmed: unknown): string | null {
+  if (!runGuardrails.requireApprovalForWrites) return null;
+  if (confirmed === true) return null;
+  return (
+    "Write operation blocked: 'Require Approval Before Writes' is enabled. " +
+    "Ask the user for explicit consent, then re-call this tool with confirmed: true."
+  );
+}
+
+const WRITE_GATE_CONFIRMED_PARAM = z
+  .boolean()
+  .optional()
+  .describe(
+    "Set to true only after the user has explicitly approved this write. " +
+      "Required when 'Require Approval Before Writes' is enabled.",
+  );
 
 function defaultSearchEngines(cfg: ReturnType<typeof readConfig>): SearchEngine[] {
   const engines: SearchEngine[] = ["ddg", "bing", "reference"];
@@ -303,6 +362,7 @@ export async function toolsProvider(ctl: any) {
     ): Promise<ToolCallResult> => {
       try {
         const ui = readConfig(ctl);
+        resetRunGuardrails(ui);
 const result = await runDeepResearch(
   {
     topic: args.topic,
@@ -348,6 +408,11 @@ const result = await runDeepResearch(
     // ONLY these two lines changed:
     enableLocalSources: args.enableLocalSources ?? ui.enableLocalSources,
     localLibraryIds: args.localLibraryIds,
+
+    allowedDomains: ui.allowedDomains,
+    blockedDomains: ui.blockedDomains,
+    maxPdfBytes: ui.maxPdfBytes,
+    llmConcurrency: ui.llmConcurrency,
   },
   status,
   warn,
@@ -874,13 +939,16 @@ const researchSearchTool = tool({
         .max(500)
         .optional()
         .describe("Optional description of what this library contains."),
+      confirmed: WRITE_GATE_CONFIRMED_PARAM,
     },
 
     implementation: async (
-      { name, folderPath, priority, tags, description },
+      { name, folderPath, priority, tags, description, confirmed },
       { status },
     ) => {
       try {
+        const gate = checkWriteApproval(confirmed);
+        if (gate) return { error: true, output: gate };
         const store = getGlobalStore();
         const cfg = readConfig(ctl);
         const library = await store.indexLibrary(
@@ -975,9 +1043,12 @@ const researchSearchTool = tool({
         .string()
         .uuid()
         .describe("The UUID of the library to remove."),
+      confirmed: WRITE_GATE_CONFIRMED_PARAM,
     },
 
-    implementation: async ({ libraryId }, { status }) => {
+    implementation: async ({ libraryId, confirmed }, { status }) => {
+      const gate = checkWriteApproval(confirmed);
+      if (gate) return { error: true, output: gate };
       const store = getGlobalStore();
       const library = store.getLibrary(libraryId);
 
@@ -1150,12 +1221,15 @@ if (removed) {
         )
         .optional()
         .describe("New tags for worker routing."),
+      confirmed: WRITE_GATE_CONFIRMED_PARAM,
     },
 
     implementation: async (
-      { libraryId, name, description, priority, tags },
+      { libraryId, name, description, priority, tags, confirmed },
       { status },
     ) => {
+      const gate = checkWriteApproval(confirmed);
+      if (gate) return { error: true, output: gate };
       const store = getGlobalStore();
       const updated = store.updateLibraryMeta(libraryId, {
         name,
@@ -1236,10 +1310,13 @@ if (removed) {
           "Path to save the index file, e.g. '~/.lmstudio/rag-index.json'. " +
           "Parent directories are created automatically.",
         ),
+      confirmed: WRITE_GATE_CONFIRMED_PARAM,
     },
 
-    implementation: async ({ filePath }, { status }) => {
+    implementation: async ({ filePath, confirmed }, { status }) => {
       try {
+        const gate = checkWriteApproval(confirmed);
+        if (gate) return { error: true, output: gate };
         const store = getGlobalStore();
         const resolvedPath = filePath.replace(/^~/, process.env.HOME || "~");
         store.saveIndex(resolvedPath);
@@ -1268,10 +1345,13 @@ if (removed) {
       "Libraries whose folders no longer exist are skipped.",
     parameters: {
       filePath: z.string().min(1).describe("Path to the saved index file."),
+      confirmed: WRITE_GATE_CONFIRMED_PARAM,
     },
 
-    implementation: async ({ filePath }, { status }) => {
+    implementation: async ({ filePath, confirmed }, { status }) => {
       try {
+        const gate = checkWriteApproval(confirmed);
+        if (gate) return { error: true, output: gate };
         const store = getGlobalStore();
         const resolvedPath = filePath.replace(/^~/, process.env.HOME || "~");
         const result = store.loadIndex(resolvedPath);
@@ -1595,8 +1675,15 @@ if (removed) {
         .record(z.unknown())
         .optional()
         .describe("Arguments object passed to the remote tool."),
+      confirmed: z
+        .boolean()
+        .optional()
+        .describe(
+          "Set to true only after the user has explicitly approved invoking this remote tool. " +
+            "Required when 'Require Approval Before Writes' is on and the target tool is write-capable.",
+        ),
     },
-    implementation: async ({ plugin, toolName, input }, { status, warn, signal }) => {
+    implementation: async ({ plugin, toolName, input, confirmed }, { status, warn, signal }) => {
       const cfg = readConfig(ctl);
       const pluginId = (plugin && plugin.trim()) || cfg.externalPluginTools[0] || "";
 
@@ -1605,6 +1692,20 @@ if (removed) {
           error: true,
           output:
             "No plugin specified and no default set. Pass 'plugin' (e.g. 'owner/name') or configure externalPluginTools in settings.",
+        } satisfies ToolCallResult;
+      }
+
+      // item 7: per-run hard cap on cross-plugin tool calls.
+      if (
+        toolName &&
+        runGuardrails.maxExternalToolCalls > 0 &&
+        runGuardrails.externalToolCallsUsed >= runGuardrails.maxExternalToolCalls
+      ) {
+        return {
+          error: true,
+          output:
+            `External plugin tool call budget exceeded: limit is ${runGuardrails.maxExternalToolCalls} call(s) ` +
+            `per research run. Ask the user to raise 'Max External Plugin Tool Calls' or reduce cross-plugin usage.`,
         } satisfies ToolCallResult;
       }
 
@@ -1647,6 +1748,18 @@ if (removed) {
         }
 
         status(`Invoking ${pluginId} -> ${toolName}...`);
+
+        // item 7: gate write-capable (or unknown-safety) remote tools behind
+        // explicit user consent when the approval flag is on.
+        if (target.readOnly === false || target.readOnly == null) {
+          const gate = checkWriteApproval(confirmed);
+          if (gate) {
+            status(gate);
+            return { error: true, output: gate } satisfies ToolCallResult;
+          }
+        }
+
+        runGuardrails.externalToolCallsUsed += 1;
         const result = await target.implementation(input ?? {}, { status, warn, signal });
         const output =
           typeof result === "string" ? result : JSON.stringify(result, null, 2);

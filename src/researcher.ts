@@ -60,14 +60,25 @@ export async function runDeepResearch(
     profile,
     cfg.contextBudgetMode ?? "auto",
     cfg.manualContextLimit ?? 8192,
-    cfg.maxSynthesisInputTokens ?? 18000
+    cfg.maxSynthesisInputTokens ?? 18000,
+    swarmResult.gradedCards,
+    swarmResult.skill
   );
 
   status(
     `Report ready - ${swarmResult.sources.length} sources, ${swarmResult.queriesUsed.length} queries`,
   );
 
-  const footer = buildRunFooter(swarmResult.runStats, swarmResult.workerErrors.length, swarmResult.sources.length, swarmResult.queriesUsed.length);
+  const footer = buildRunFooter(
+    swarmResult.runStats,
+    swarmResult.workerErrors.length,
+    swarmResult.sources.length,
+    swarmResult.queriesUsed.length,
+    report.citationPass,
+    report.contradictionCount,
+    report.retryUsed,
+    report.skillUsed,
+  );
   const finalMarkdown = footer
     ? `${report.markdown.trim()}\n\n${footer}`
     : report.markdown;
@@ -85,6 +96,10 @@ function buildRunFooter(
   workerErrorCount: number,
   sourceCount: number,
   queryCount: number,
+  citationPass?: boolean,
+  contradictionCount?: number,
+  retryUsed?: boolean,
+  skillUsed?: string,
 ): string {
   if (!stats) return "";
   const elapsedMin = Math.round(stats.runtimeElapsedMs / 60000);
@@ -97,6 +112,12 @@ function buildRunFooter(
     `Queries run: ${queryCount}`,
     `Worker errors: ${workerErrorCount}`,
     "",
+    "## ✅ Citation Verification",
+    `Citation pass: ${citationPass === undefined ? "not checked" : citationPass ? "PASS" : "FAIL"}`,
+    `Contradictions detected: ${contradictionCount ?? 0}`,
+    `Synthesis retry: ${retryUsed ? "yes" : "no"}`,
+    `Skill pack: ${skillUsed ?? "none"}`,
+    "",
     "## 🚦 Source Health",
     `DDG state: ${stats.ddgState}`,
     `DDG searches attempted: ${stats.ddgQueries}`,
@@ -104,6 +125,7 @@ function buildRunFooter(
     "",
     "## 🤖 LLM Watchdog",
     `LLM calls used: ${stats.llmCallsUsed} / ${stats.llmCallBudget}`,
+    `Critic/verifier: ${stats.criticCallsUsed} grading call${stats.criticCallsUsed === 1 ? "" : "s"}, ${stats.criticRetrySourcesAdded} retry source${stats.criticRetrySourcesAdded === 1 ? "" : "s"} added`,
     `Runtime: ${elapsedMin} min`,
     `Session limit: ${fmtMin(stats.sessionLimitMs)} | Effective runtime: ${fmtMin(stats.effectiveRuntimeMs)}`,
     "",

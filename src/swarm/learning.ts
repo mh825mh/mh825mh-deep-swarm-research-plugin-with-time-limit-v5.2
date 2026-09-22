@@ -195,7 +195,7 @@ export class MutationStatsStore extends JsonStore<MutationStatsFile> {
 // Domain acceptance adjustments
 // ---------------------------------------------------------------------------
 
-interface DomainAdjEntry {
+export interface DomainAdjEntry {
   score: number;
   accepted: number;
   seen: number;
@@ -229,6 +229,16 @@ export class DomainAdjustmentsStore extends JsonStore<DomainAdjFile> {
     if (!entry || entry.seen < 3) return 0;
     // score 0.5 -> 0 ; 1.0 -> +15 ; 0.0 -> -10
     return entry.score >= 0.5 ? (entry.score - 0.5) * 30 : (entry.score - 0.5) * 20;
+  }
+
+  /** Enumeration of known host adjustments (host, score, accepted, seen). */
+  entries(): ReadonlyArray<{ readonly host: string; readonly score: number; readonly accepted: number; readonly seen: number }> {
+    return Object.entries(this.value.domains).map(([host, e]) => ({
+      host,
+      score: e.score,
+      accepted: e.accepted,
+      seen: e.seen,
+    }));
   }
 }
 

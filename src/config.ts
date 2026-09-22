@@ -351,5 +351,84 @@ export const configSchematics = createConfigSchematics()
       subtitle: "Optional: Local endpoint to bypass strict Cloudflare blocks (e.g., http://127.0.0.1:8191/v1). Leave blank to disable.",
     },
     ""
-  )  
+  )
+  .field(
+    "allowedDomains",
+    "string",
+    {
+      displayName: "Allowed Domains (Advanced)",
+      subtitle:
+        "Comma-separated allow-list of root domains. When set, workers only crawl/search " +
+        "URLs whose host is this domain or a subdomain of it (e.g. arxiv.org). Leave blank to allow all.",
+    },
+    ""
+  )
+  .field(
+    "blockedDomains",
+    "string",
+    {
+      displayName: "Blocked Domains (Advanced)",
+      subtitle:
+        "Comma-separated deny-list of root domains. URLs on these hosts (or subdomains) are " +
+        "skipped and reported in the run's blocked_urls. Blocked wins over Allowed.",
+    },
+    ""
+  )
+  .field(
+    "maxPdfBytes",
+    "numeric",
+    {
+      displayName: "Max PDF Download Size (bytes)",
+      subtitle:
+        "Hard cap on bytes streamed per PDF before extraction. 0 = no cap. " +
+        "Prevents a single giant document from eating the whole crawl budget.",
+      min: 0,
+      max: 100000000,
+      int: true,
+    },
+    0,
+  )
+  .field(
+    "maxExternalToolCalls",
+    "numeric",
+    {
+      displayName: "Max External Plugin Tool Calls (per run)",
+      subtitle:
+        "Hard cap on 'Use Plugin Tool' invocations within one research run. 0 = unlimited.",
+      min: 0,
+      max: 200,
+      int: true,
+    },
+    0,
+  )
+  .field(
+    "requireApprovalForWrites",
+    "select",
+    {
+      displayName: "Require Approval Before Writes",
+      subtitle:
+        "When On, RAG write tools (Add/Update/Remove/Save/Load) and remote 'Use Plugin Tool' " +
+        "invocations require an explicit confirmed:true argument, so a model cannot silently " +
+        "modify your index or call write-capable external tools.",
+      options: [
+        { value: "on", displayName: "On — require confirmed:true" },
+        { value: "off", displayName: "Off — allow without confirmation" },
+      ],
+    },
+    "off",
+  )
+  .field(
+    "llmConcurrency",
+    "numeric",
+    {
+      displayName: "Concurrent LLM Calls",
+      subtitle:
+        "Parallel predictions bound globally with a semaphore (LM Studio usually serves one " +
+        "kv-cache slot, so 1 is the safe default). Worker crawling stays parallel regardless.",
+      min: 1,
+      max: 8,
+      int: true,
+    },
+    1,
+  )
   .build();

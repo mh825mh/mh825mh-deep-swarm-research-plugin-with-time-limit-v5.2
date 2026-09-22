@@ -57,6 +57,117 @@ export interface EvidenceCard {
   readonly entityMetadata: EntityMetadata;
 }
 
+export type SourceNature = "primary" | "secondary" | "unknown";
+export type Datedness = "dated" | "undated" | "stale";
+
+/**
+ * Grading produced by the critic/verifier worker. The critic is a second,
+ * non-searching worker that only grades evidence cards produced by the crawl
+ * workers (evaluator–optimizer split), so the synthesis never trusts raw worker
+ * prose.
+ */
+export interface CriticVerdict {
+  readonly cardId: string;
+  readonly onTopic: boolean;
+  readonly dated: Datedness;
+  readonly sourceNature: SourceNature;
+  /** Ids of ledger cards this card's claim conflicts with. */
+  readonly contradicts: ReadonlyArray<string>;
+  readonly claimStrength: ClaimStrength;
+  /** PASS means the card may enter the synthesis ledger. */
+  readonly pass: boolean;
+  readonly note: string;
+}
+
+export interface GradedEvidenceCard extends EvidenceCard {
+  readonly critic: CriticVerdict;
+}
+
+export interface CriticSummary {
+  readonly graded: number;
+  readonly failed: number;
+  readonly callsUsed: number;
+  readonly retryRoundSpawned: boolean;
+  readonly retrySourcesAdded: number;
+}
+
+// ---------------------------------------------------------------------------
+// Cross-run layered memory (src/memory/)
+// ---------------------------------------------------------------------------
+
+export type MemoryRanker = "embeddings" | "bm25";
+
+/** Compact per-card view of the graded ledger stored in episodic memory. */
+export interface LedgerSnapshotCard {
+  readonly id: string;
+  readonly claim: string;
+  readonly verdict: "pass" | "fail";
+  readonly contradiction: boolean;
+}
+
+/** Episodic layer — what happened on a past run. */
+export interface RunSummary {
+  readonly runId: string;
+  readonly topic: string;
+  readonly topicKeywords: ReadonlyArray<string>;
+  readonly depthPreset: string;
+  readonly focusAreas: ReadonlyArray<string>;
+  readonly timestamp: string;
+  readonly queriesUsed: ReadonlyArray<string>;
+  readonly sourceCount: number;
+  readonly engineHits: ReadonlyArray<{ readonly engine: string; readonly hits: number }>;
+  readonly failedUrls: ReadonlyArray<string>;
+  readonly failedHosts: ReadonlyArray<string>;
+  readonly ledger: ReadonlyArray<LedgerSnapshotCard>;
+  readonly llmCallsUsed: number;
+  readonly criticCallsUsed: number;
+  readonly runtimeSec: number;
+  readonly usedAI: boolean;
+}
+
+/** Semantic layer — durable facts ("source X is consistently off-topic", ...). */
+export interface SemanticFact {
+  readonly factId: string;
+  readonly kind: "offtopic_domain" | "preference" | "glossary" | "note";
+  readonly text: string;
+  readonly source: string;
+  readonly score: number;
+  readonly timestamp: string;
+  readonly topic?: string;
+}
+
+/** Procedural layer — winning query mutations, skill files, plugin tools. */
+export interface ProceduralMemory {
+  readonly procedureId: string;
+  readonly kind: "mutation" | "skill" | "plugin_tool";
+  readonly label: string;
+  readonly score: number;
+  readonly topic?: string;
+  readonly timestamp: string;
+}
+
+/** Persisted shape of the layered memory store. */
+export interface MemoryLayers {
+  readonly version: 1;
+  readonly runs: ReadonlyArray<RunSummary>;
+  readonly facts: ReadonlyArray<SemanticFact>;
+  readonly procedures: ReadonlyArray<ProceduralMemory>;
+}
+
+/**
+ * Retrieved prior-run context injected into a new run before decomposition.
+ * Built by retrieveMemory() and consumed by the planner + swarm bootstrap.
+ */
+export interface MemoryContext {
+  readonly runs: ReadonlyArray<RunSummary>;
+  readonly facts: ReadonlyArray<SemanticFact>;
+  readonly procedures: ReadonlyArray<ProceduralMemory>;
+  readonly goodEngines: ReadonlyArray<string>;
+  readonly failedUrls: ReadonlyArray<string>;
+  readonly failedHosts: ReadonlyArray<string>;
+  readonly ranker: MemoryRanker;
+}
+
 export interface CompiledReport {
   readonly markdown: string;
   readonly sources: ReadonlyArray<ReportSource>;
@@ -67,6 +178,44 @@ export interface CompiledReport {
   readonly contradictions: ReadonlyArray<ContradictionEntry>;
   readonly isPartialRun?: boolean;
   readonly timeoutReason?: string;
+  /** pass^k-lite: whether every citation index in the synthesis maps to a ledger card. */
+  readonly citationPass?: boolean;
+  /** pass^k-lite: whether a single synthesis retry was performed. */
+  readonly retryUsed?: boolean;
+  /** Number of contradiction entries surfaced in the report. */
+  readonly contradictionCount?: number;
+  /** Skill pack auto-selected from planner domain tags, e.g. "academic v1". */
+  readonly skillUsed?: string;
+}
+
+/**
+ * Result of the independent citation verifier. The LLM never invents URLs:
+ * every `[n]` citation index in the synthesized markdown must map to a ledger
+ * card, and any URL written in the synthesis must equal a card's canonical URL.
+ */
+export interface CitationCheckResult {
+  readonly pass: boolean;
+  readonly orphanIndices: ReadonlyArray<string>;
+  readonly foreignUrls: ReadonlyArray<string>;
+}
+
+/** Skill pack loaded from the bundled pack dir or ~/.deep-swarm-research/skills. */
+export interface SkillPack {
+  readonly name: string;
+  readonly version: string;
+  readonly domainTags: ReadonlyArray<string>;
+  readonly description: string;
+  readonly content: string;
+  readonly filePath: string;
+  /** True when the file came from the user override dir (wins over bundled). */
+  readonly userOverride: boolean;
+}
+
+/** A URL the swarm refused or failed to fetch, surfaced on the blackboard. */
+export interface BlockedUrlEntry {
+  readonly url: string;
+  readonly reason: string;
+  readonly count: number;
 }
 
 export type SourceTier =
@@ -151,6 +300,13 @@ export interface SwarmTask {
   readonly telegramChannels?: ReadonlyArray<string>;
   /** When false, no persistent heuristic learning is recorded. Default: true. */
   readonly enableAdaptiveLearning?: boolean;
+  /** Deterministic domain allow-list (hosts only; subdomains of a listed parent
+   * count as allowed). Empty array = no allow restriction. */
+  readonly allowedDomains?: ReadonlyArray<string>;
+  /** Deterministic domain deny-list — always wins over the allow-list. */
+  readonly blockedDomains?: ReadonlyArray<string>;
+  /** Hard cap on accepted PDF bytes (0 or undefined = unbounded). */
+  readonly maxPdfBytes?: number;
 }
 
 
@@ -218,6 +374,26 @@ export interface QueryPlan {
   readonly usedAI: boolean;
   readonly topicKeywords: ReadonlyArray<string>;
   readonly dynamicSpecs?: ReadonlyArray<DynamicWorkerSpec>;
+  /** Structured plan (item 4) when the planner ran with structured output. */
+  readonly researchPlan?: ResearchPlan;
+  /** Domain classification tags used for skill-pack auto-selection (item 8). */
+  readonly domainTags?: ReadonlyArray<string>;
+}
+
+/**
+ * First-class structured research plan (item 4). Produced by the planner via
+ * LM Studio structured output (JSON schema); every field is deterministic —
+ * workers, open questions, stop conditions, the estimated time budget left,
+ * and the citation policy ("index-only": citations are keys into the ledger,
+ * the model never invents URLs).
+ */
+export interface ResearchPlan {
+  readonly workers: ReadonlyArray<DynamicWorkerSpec>;
+  readonly questions: ReadonlyArray<string>;
+  readonly stopConditions: ReadonlyArray<string>;
+  readonly estimatedRemainingMs: number;
+  readonly citationPolicy: "index-only";
+  readonly domainTags: ReadonlyArray<string>;
 }
 
 export interface AdaptiveGapPlan {
@@ -327,6 +503,36 @@ export interface ResearchConfig {
    * domain adjustments, LLM hints). Default: on.
    */
   readonly enableAdaptiveLearning?: boolean;
+
+  /**
+   * Cross-run layered memory (~/.deep-swarm-research/memory/run-memory.json):
+   * episodic run summaries, derived semantic facts, and procedural winners are
+   * written at the end of every run and recalled before decomposition on the
+   * next run. Default: on.
+   */
+  readonly enableRunMemory?: boolean;
+
+  /** Max number of episodic run summaries retained. Default: preset cap (6). */
+  readonly memoryRetainRuns?: number;
+
+  /**
+   * Deterministic guardrails (item 7). Optional allow/deny domain lists applied
+   * to every candidate, page fetch, and outlink evaluation.
+   */
+  readonly allowedDomains?: ReadonlyArray<string>;
+  readonly blockedDomains?: ReadonlyArray<string>;
+  /** Hard cap on PDF bytes accepted for extraction (0 = no explicit cap). */
+  readonly maxPdfBytes?: number;
+  /** Hard cap on cross-plugin `Use Plugin Tool` invocations per run. */
+  readonly maxExternalToolCalls?: number;
+  /**
+   * When true, write-capable operations (RAG Add/Remove/Save/Load, external
+   * plugin tools) require an explicit `confirmed: true` argument — the model
+   * must obtain user consent in the conversation before any write happens.
+   */
+  readonly requireApprovalForWrites?: boolean;
+  /** Max simultaneous in-flight LLM predictions (0 = default of 1). */
+  readonly llmConcurrency?: number;
 }
 
 export interface ResearchResult {

@@ -32,11 +32,11 @@ import {
   isPdfContentType,
   extractPdf,
 } from "../net/pdf-extractor";
+import { scoreCandidate, rankCandidates, scoreOutlinks } from "../scoring/authority";
 import {
-  scoreCandidate,
-  rankCandidates,
-  scoreOutlinks,
-} from "../scoring/authority";
+  buildDomainPolicyFromTask,
+  urlAllowed,
+} from "../net/domain-policy";
 import {
   SwarmTask,
   WorkerResult,
@@ -49,6 +49,7 @@ import {
   ExtractedPage,
 } from "../types";
 import { harvestLocalSources } from "../local/search";
+import { BlockedUrlEntry } from "../types";
 import {
   BATCH_INTER_FETCH_DELAY_MS,
   MIN_USEFUL_WORD_COUNT,
@@ -91,6 +92,7 @@ export interface CrawlMetrics {
   followedLinks: number;
   crossWorkerDiscoveriesUsed: number;
   localSourcesAccepted: number;
+  skippedDomainPolicy: number;
 }
 
 export interface SharedCrawlState {
@@ -106,6 +108,7 @@ export interface SharedCrawlState {
   noteDomainFailure(url: string): void;
   isDomainBlacklisted(url: string): boolean;
   shouldAvoidUrl(url: string): boolean;
+  listBlockedUrls(): ReadonlyArray<BlockedUrlEntry>;
   pushDiscovery(url: string, title: string, fromWorker: string): void;
   drainDiscoveries(limit: number): ReadonlyArray<{ url: string; title: string }>;
   isRecentlyVisited(url: string): boolean;
@@ -161,6 +164,7 @@ function zeroMetrics(): CrawlMetrics {
     skippedAvoided: 0, skippedBlacklisted: 0, skippedNegativeCache: 0, cacheChecks: 0, cacheHits: 0, cacheAccepted: 0,
     cacheRejectedDuplicate: 0, cacheRejectedOffTopic: 0, cacheRejectedLowWordCount: 0,
     cacheWrites: 0, followedLinks: 0, crossWorkerDiscoveriesUsed: 0, localSourcesAccepted: 0,
+    skippedDomainPolicy: 0,
   };
 }
 
@@ -511,6 +515,7 @@ async function fetchBatch(
   const concurrency = task.workerConcurrency;
   const domainCap = task.maxPagesPerDomain;
   const minRelevance = task.minRelevanceScore;
+  const domainPolicy = buildDomainPolicyFromTask(task);
 
   while (results.length < task.pageBudget && idx < candidates.length && !signal.aborted) {
     const slice = candidates.slice(idx, idx + concurrency);
@@ -518,6 +523,8 @@ async function fetchBatch(
 
     const batch: ScoredCandidate[] = [];
     for (const c of slice) {
+      const policy = urlAllowed(c.url, domainPolicy);
+      if (!policy.allowed) { metrics.skippedDomainPolicy++; continue; }
       const normalized = normalizeUrl(c.url);
       if (state.visitedUrls.has(normalized)) { metrics.skippedVisited++; continue; }
       if (state.domainCount(c.url) >= domainCap) { metrics.skippedDomainCap++; continue; }
@@ -655,9 +662,12 @@ async function followLinks(
 ): Promise<number> {
   const allLinks = existingSources.flatMap((s) => s.outlinks);
   const linkKws = task.queries.join(" ").toLowerCase().split(/\s+/).filter((w) => w.length > 3).slice(0, 12);
+  const domainPolicy = buildDomainPolicyFromTask(task);
 
   const scored = scoreOutlinks(allLinks, linkKws, state.visitedUrls, task.maxLinksToEvaluate);
-  const toFollow = scored.slice(0, task.maxLinksToFollow);
+  const toFollow = scored
+    .filter((l) => urlAllowed(l.href, domainPolicy).allowed)
+    .slice(0, task.maxLinksToFollow);
 
   if (toFollow.length === 0) return 0;
 
@@ -703,6 +713,13 @@ async function fetchAndExtract(
     const maxChunks = Math.max(1, task.extractPagesPerSource ?? 1);
 
     const isPdf = (fetchResult.rawBuffer && isPdfContentType(fetchResult.contentType)) || (!fetchResult.rawBuffer && isPdfUrl(url));
+
+    const pdfBuffer = isPdf && fetchResult.rawBuffer ? fetchResult.rawBuffer : undefined;
+    if (pdfBuffer && task.maxPdfBytes && pdfBuffer.byteLength > task.maxPdfBytes) {
+      throw new Error(
+        `PDF exceeds maxPdfBytes (${pdfBuffer.byteLength} > ${task.maxPdfBytes}) — skipped.`,
+      );
+    }
 
     const extractChunk = async (pageNo: number): Promise<ExtractedPage> => {
       if (isPdf && fetchResult.rawBuffer) {

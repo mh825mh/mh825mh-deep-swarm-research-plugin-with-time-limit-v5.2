@@ -1,6 +1,55 @@
 // src/utils/llm.ts
 import { LMStudioClient } from "@lmstudio/sdk";
+import { z } from "zod";
 import { LlmCallBudget, RunWatchdog, ContextIsolationMode } from "../types";
+
+/**
+ * Bounded semaphore so parallel swarm workers never fire more concurrent
+ * predictions at LM Studio than it can safely multiplex. Local 7B–14B models
+ * are typically served by a single kv-cache slot, so the default is 1; a run
+ * may raise it via the `llmConcurrency` config.
+ */
+export class LlmSemaphore {
+  private readonly maxActive: number;
+  private active = 0;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(maxActive: number) {
+    this.maxActive = Math.max(1, Math.floor(maxActive) || 1);
+  }
+
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.active < this.maxActive) {
+      this.active++;
+      try {
+        return await fn();
+      } finally {
+        this.active--;
+        this.pump();
+      }
+    }
+    await new Promise<void>((resolve) => this.waiters.push(resolve));
+    return this.run(fn);
+  }
+
+  get activeCount(): number {
+    return this.active;
+  }
+
+  private pump(): void {
+    while (this.active < this.maxActive && this.waiters.length > 0) {
+      const next = this.waiters.shift();
+      if (next) next();
+    }
+  }
+}
+
+let llmSemaphore = new LlmSemaphore(1);
+
+/** Set the global LLM prediction concurrency cap. Call once per run. */
+export function setLlmConcurrency(maxConcurrent: number): void {
+  llmSemaphore = new LlmSemaphore(maxConcurrent);
+}
 
 export interface AskModelOptions {
   readonly system?: string;
@@ -10,18 +59,22 @@ export interface AskModelOptions {
   readonly signal?: AbortSignal;
 }
 
-export async function askLoadedModel(
-  prompt: string,
-  options: AskModelOptions = {},
-): Promise<string | null> {
-  if (options.signal?.aborted) return null;
-  const {
-    system,
-    maxTokens = 400,
-    temperature = 0.7,
-    timeoutMs = 60_000,
-  } = options;
+export interface AskStructuredOptions extends AskModelOptions {
+  /** Plain JSON Schema (draft-07 subset) handed to LM Studio structured output. */
+  readonly jsonSchema: Record<string, unknown>;
+}
 
+export async function requestPrediction(
+  messages: ReadonlyArray<{ role: "system" | "user"; content: string }>,
+  opts: {
+    maxTokens?: number;
+    temperature?: number;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  },
+): Promise<string | null> {
+  if (opts.signal?.aborted) return null;
+  const { maxTokens = 400, temperature = 0.7, timeoutMs = 60_000 } = opts;
   try {
     const client = new LMStudioClient();
     const models = await Promise.race([
@@ -32,19 +85,86 @@ export async function askLoadedModel(
     ]);
     if (!Array.isArray(models) || models.length === 0) return null;
     const model = await client.llm.model(models[0].identifier);
-    const messages: Array<{ role: "system" | "user"; content: string }> = system
-      ? [
-          { role: "system", content: system },
-          { role: "user", content: prompt },
-        ]
-      : [{ role: "user", content: prompt }];
-    const stream = model.respond(messages, { maxTokens, temperature });
+    const stream = model.respond(messages as never, { maxTokens, temperature });
     let result = "";
     for await (const chunk of stream) result += chunk.content ?? "";
     return result.trim() || null;
   } catch {
     return null;
   }
+}
+
+export async function askLoadedModel(
+  prompt: string,
+  options: AskModelOptions = {},
+): Promise<string | null> {
+  const { system, ...rest } = options;
+  const messages: ReadonlyArray<{ role: "system" | "user"; content: string }> =
+    system
+      ? [
+          { role: "system", content: system },
+          { role: "user", content: prompt },
+        ]
+      : [{ role: "user", content: prompt }];
+  return llmSemaphore.run(() => requestPrediction(messages, rest));
+}
+
+/**
+ * Best-effort structured prediction (item 4). Routes through LM Studio's native
+ * structured output when the server supports it; on any failure/interrupt the
+ * caller falls back to its deterministic path (the run never breaks on older
+ * servers). The returned value is schema-validated by zod before being trusted.
+ */
+export async function askStructured<S extends z.ZodTypeAny>(
+  prompt: string,
+  schema: S,
+  options: AskStructuredOptions,
+): Promise<z.output<S> | null> {
+  const {
+    system,
+    jsonSchema,
+    maxTokens = 800,
+    temperature = 0.3,
+    timeoutMs = 30_000,
+    signal,
+  } = options;
+  const messages: ReadonlyArray<{ role: "system" | "user"; content: string }> =
+    system
+      ? [
+          { role: "system", content: system },
+          { role: "user", content: prompt },
+        ]
+      : [{ role: "user", content: prompt }];
+
+  return llmSemaphore.run(async () => {
+    if (signal?.aborted) return null;
+    try {
+      const client = new LMStudioClient();
+      const models = await Promise.race([
+        client.llm.listLoaded(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("timeout")), timeoutMs),
+        ),
+      ]);
+      if (!Array.isArray(models) || models.length === 0) return null;
+      const model = await client.llm.model(models[0].identifier);
+      const stream = model.respond(messages as never, {
+        maxTokens,
+        temperature,
+        structured: { type: "json", jsonSchema },
+      });
+      let result = "";
+      for await (const chunk of stream) result += chunk.content ?? "";
+      const cleaned = result
+        .replace(/^```(?:json)?\s*/i, "")
+        .replace(/```\s*$/i, "")
+        .trim();
+      if (!cleaned) return null;
+      return schema.parse(JSON.parse(cleaned));
+    } catch {
+      return null;
+    }
+  });
 }
 
 /**

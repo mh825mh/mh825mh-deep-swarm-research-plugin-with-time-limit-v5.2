@@ -1,4 +1,5 @@
 import { runWorker, CrawlMetrics } from "./worker";
+import { SwarmBlackboard } from "./blackboard";
 import { LMStudioClient } from "@lmstudio/sdk";
 import {
   buildQueryPlan,
@@ -17,16 +18,24 @@ import {
   WarnFn,
   SourceTier,
   ContradictionEntry,
+  GradedEvidenceCard,
+  CriticSummary,
+  SkillPack,
+  BlockedUrlEntry,
 } from "../types";
-import { DepthProfile } from "../constants";
+import { DepthProfile, CRITIC_RETRY_MAX_TASKS, CRITIC_RETRY_PAGE_BUDGET } from "../constants";
 import { DdgLimiterPool, resetThrottle } from "../net/ddg";
 import { resetArchiveSession, getArchiveState } from "../net/http";
 import { VisitedPageCache, normalizeUrl, type VisitedCacheStats } from "./visited-cache";
 import { log } from "./logger";
-import { detectContradictions } from "../synthesis/ai";
+import { buildEvidenceCards } from "../scoring/evidence";
+import { runCritic, buildRetryQueries } from "../scoring/critic";
 import { SearchHealthTracker, EngineState } from "./health";
-import { LlmCallManager, askLoadedModel, hasLoadedModel } from "../utils/llm";
+import { LlmCallManager, askLoadedModel, hasLoadedModel, setLlmConcurrency } from "../utils/llm";
+import { selectSkillForTags, skillLabel } from "../skills/select";
 import { getEngineStats, getLearnedHints } from "./learning";
+import { persistRunMemory } from "../memory/persist";
+import { retrieveMemoryForTopic } from "../memory/retrieve";
 import { probeFlareSolverr, resetFsStats } from "../net/waterfallFetcher";
 import { resetDecodoSession, setDecodoToken, getDecodoStats } from "../net/decodoApi";
 import fs from "node:fs";
@@ -52,7 +61,7 @@ function zeroMetrics(): CrawlMetrics {
     cacheChecks: 0,
     cacheHits: 0, cacheAccepted: 0, cacheRejectedDuplicate: 0, cacheRejectedOffTopic: 0,
     cacheRejectedLowWordCount: 0, cacheWrites: 0, followedLinks: 0,
-    crossWorkerDiscoveriesUsed: 0, localSourcesAccepted: 0,
+    crossWorkerDiscoveriesUsed: 0, localSourcesAccepted: 0, skippedDomainPolicy: 0,
   };
 }
 
@@ -120,6 +129,17 @@ class MutableCrawlState implements SharedCrawlState {
     const count = (this._domainFailures.get(host) ?? 0) + 1;
     this._domainFailures.set(host, count);
     if (count >= 3) this._blacklistedDomains.add(host);
+  }
+
+  listBlockedUrls(): ReadonlyArray<BlockedUrlEntry> {
+    return Array.from(this._failedUrls.entries())
+      .map(([url, info]) => ({
+        url,
+        reason: info.reason,
+        count: info.count,
+      }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 200);
   }
 
   isDomainBlacklisted(url: string): boolean {
@@ -244,6 +264,9 @@ function buildTaskBase(
   | "rssFeedUrls"
   | "telegramChannels"
   | "enableAdaptiveLearning"
+  | "allowedDomains"
+  | "blockedDomains"
+  | "maxPdfBytes"
 > {
   return {
     contentLimit:
@@ -282,6 +305,9 @@ function buildTaskBase(
     rssFeedUrls: cfg.rssFeedUrls,
     telegramChannels: cfg.telegramChannels,
     enableAdaptiveLearning: cfg.enableAdaptiveLearning !== false,
+    allowedDomains: cfg.allowedDomains,
+    blockedDomains: cfg.blockedDomains,
+    maxPdfBytes: cfg.maxPdfBytes && cfg.maxPdfBytes > 0 ? cfg.maxPdfBytes : undefined,
   };
 }
 
@@ -437,6 +463,14 @@ export interface OrchestratorResult {
   readonly workerErrors: ReadonlyArray<string>;
   readonly usedAI: boolean;
   readonly topicKeywords: ReadonlyArray<string>;
+  /** Critic-graded evidence ledger (pass + fail cards) when the critic ran. */
+  readonly gradedCards?: ReadonlyArray<GradedEvidenceCard>;
+  readonly criticSummary?: CriticSummary;
+  /** Planner domain tags, used for skill-pack auto-selection (item 8). */
+  readonly domainTags?: ReadonlyArray<string>;
+  /** Auto-selected skill pack applied to critic + synthesis prompts. */
+  readonly skill?: SkillPack;
+  readonly blackboardSnapshot?: import("./blackboard").BlackboardSnapshot;
   readonly runStats?: {
     readonly ddgState: EngineState;
     readonly ddgQueries: number;
@@ -453,6 +487,8 @@ export interface OrchestratorResult {
     readonly cacheFile: string;
     readonly cacheMaxAgeDays: number;
     readonly cacheMaxEntries: number;
+    readonly criticCallsUsed: number;
+    readonly criticRetrySourcesAdded: number;
   };
 }
 
@@ -469,6 +505,7 @@ export interface SharedCrawlState {
   noteDomainFailure(url: string): void;
   isDomainBlacklisted(url: string): boolean;
   shouldAvoidUrl(url: string): boolean;
+  listBlockedUrls(): ReadonlyArray<BlockedUrlEntry>;
   pushDiscovery(url: string, title: string, fromWorker: string): void;
   drainDiscoveries(limit: number): ReadonlyArray<{ url: string; title: string }>;
   isRecentlyVisited(url: string): boolean;
@@ -506,6 +543,9 @@ export async function runSwarm(
   resetDecodoSession();
   setDecodoToken(cfg.decodoApiToken);
   const runStartedAt = Date.now();
+
+  // item 5: bound parallel LLM predictions (default 1 — a single kv-cache slot).
+  setLlmConcurrency(cfg.llmConcurrency && cfg.llmConcurrency > 0 ? cfg.llmConcurrency : 1);
 
   // ==========================================
   // FLARESOLVERR PRE-FLIGHT PROBE
@@ -550,8 +590,39 @@ export async function runSwarm(
     fileStatus,
     profile,
   );
+  const memoryContext = retrieveMemoryForTopic({
+  topic: cfg.topic,
+  topicKeywords: plan.topicKeywords,
+});
+void memoryContext;
   const roles = rolesForProfile(profile);
   const pool = new DdgLimiterPool(profile.searchLanes, profile.ddgRateLimitMs);
+
+  // item 8: auto-select a skill pack from the planner's domain tags and apply
+  // it to the critic + synthesis prompts. Available without LLM calls.
+  const skill = selectSkillForTags(plan.domainTags ?? []) ?? undefined;
+  if (skill) {
+    fileStatus(
+      `[SKILL] Auto-selected pack "${skill.name}" v${skill.version} from tags: ${(plan.domainTags ?? []).join(", ")}${skill.userOverride ? " (user override)" : " (bundled)"}`,
+    );
+  }
+
+  // Time budget: keep min(session, LLM mode cap) for a finite session. A value
+  // of 0 means "no session limit" for crawling (LLM calls remain bounded by the
+  // mode budget). The effective runtime is enforced by a real wall-clock timer.
+  const sessionLimitMs =
+    cfg.maxSessionMs && cfg.maxSessionMs > 0 ? cfg.maxSessionMs : Infinity;
+  const modeRuntimeCapMs = llmManager.budget.maxRuntimeMs;
+  const effectiveRuntimeMs =
+    sessionLimitMs === Infinity ? Infinity : Math.min(sessionLimitMs, modeRuntimeCapMs);
+  const fmtMin = (ms: number) => (ms === Infinity ? "unlimited" : `${Math.round(ms / 60000)}m`);
+  const startTime = Date.now();
+  const crawlDeadline =
+    effectiveRuntimeMs === Infinity ? Infinity : startTime + effectiveRuntimeMs * 0.80; // Reserve 20% for synthesis
+
+  // item 5: the shared blackboard — plan, gaps, cards, blocked_urls, time_left.
+  const blackboard = new SwarmBlackboard(() => state.listBlockedUrls(), crawlDeadline);
+  blackboard.attachPlan(plan.researchPlan ?? null);
 
   // ==========================================
   // LAYER 1: THE AI RAG GATEKEEPER
@@ -605,6 +676,7 @@ export async function runSwarm(
   
   for (const gap of gaps) {
     if (signal.aborted) break;
+    blackboard.addGap(gap.label);
     health.gaps.push({
       id: `gap-${gap.id}`,
       topic: cfg.topic,
@@ -632,19 +704,6 @@ export async function runSwarm(
     }
     return task;
   });
-
-  // Time budget: keep min(session, LLM mode cap) for a finite session. A value
-  // of 0 means "no session limit" for crawling (LLM calls remain bounded by the
-  // mode budget). The effective runtime is enforced by a real wall-clock timer.
-  const sessionLimitMs =
-    cfg.maxSessionMs && cfg.maxSessionMs > 0 ? cfg.maxSessionMs : Infinity;
-  const modeRuntimeCapMs = llmManager.budget.maxRuntimeMs;
-  const effectiveRuntimeMs =
-    sessionLimitMs === Infinity ? Infinity : Math.min(sessionLimitMs, modeRuntimeCapMs);
-  const fmtMin = (ms: number) => (ms === Infinity ? "unlimited" : `${Math.round(ms / 60000)}m`);
-  const startTime = Date.now();
-  const crawlDeadline =
-    effectiveRuntimeMs === Infinity ? Infinity : startTime + effectiveRuntimeMs * 0.80; // Reserve 20% for synthesis
 
   fileStatus(
     `[RUN CONTROL] Session limit: ${fmtMin(sessionLimitMs)} | LLM mode cap: ${fmtMin(modeRuntimeCapMs)} | Effective runtime: ${fmtMin(effectiveRuntimeMs)} (crawl stops at 80%)`,
@@ -758,12 +817,136 @@ export async function runSwarm(
   allSources.push(...sortedSources.slice(0, profile.synthesisMaxSources || 25));
 
   // ==========================================
+  // CRITIC / VERIFIER PHASE (evaluator-optimizer)
+  // ==========================================
+  // Grade the evidence cards produced by the crawl workers with a dedicated,
+  // non-searching critic. Only FAILING claims trigger one targeted retry round
+  // (cheaper than another full research round). The synthesis downstream reads
+  // this graded ledger instead of raw worker prose.
+  let gradedCards: ReadonlyArray<GradedEvidenceCard> = [];
+  let criticCallsUsed = 0;
+  let criticRetrySourcesAdded = 0;
+  let criticFailCount = 0;
+  let criticRetryTasksSpawned = false;
+
+  if (
+    !signal.aborted &&
+    !llmManager.signal.aborted &&
+    Date.now() < crawlDeadline &&
+    !llmManager.shouldStop()
+  ) {
+    const ledgerCards = buildEvidenceCards(allSources, profile);
+    const gradable = ledgerCards.filter((c) => c.verificationTier !== "REJECTED");
+
+    const criticResult = await runCritic({
+      cards: gradable,
+      topic: cfg.topic,
+      topicKeywords: plan.topicKeywords,
+      llmManager,
+      status: fileStatus,
+      warn: fileWarn,
+      signal,
+      skill,
+    });
+    criticCallsUsed = criticResult.callsUsed;
+    criticFailCount = criticResult.failed.length;
+    gradedCards = [...criticResult.graded, ...criticResult.failed];
+
+    if (
+      criticResult.failed.length > 0 &&
+      !signal.aborted &&
+      !llmManager.signal.aborted &&
+      Date.now() < crawlDeadline &&
+      !llmManager.shouldStop()
+    ) {
+      const retryQueries = buildRetryQueries(criticResult.failed, cfg.topic, CRITIC_RETRY_MAX_TASKS);
+      if (retryQueries.length > 0) {
+        const retryTasks = buildGapTasks(
+          [
+            {
+              role: "breadth",
+              label: `Critic Retry: ${retryQueries[0].slice(0, 60)}`,
+              queries: retryQueries,
+              followLinks: false,
+            } satisfies GapPlanLike,
+          ],
+          2,
+          profile,
+          cfg,
+        ).map((t) => ({ ...t, pageBudget: CRITIC_RETRY_PAGE_BUDGET }));
+
+        criticRetryTasksSpawned = true;
+        fileStatus(
+          `🔎 [CRITIC] ${criticResult.failed.length} failing claim(s) trigger a targeted retry round (${retryQueries.length} query/w).`,
+        );
+        const beforeSources = allSources.length;
+        const retryResults = await runTaskGroup(
+          retryTasks,
+          state,
+          pool,
+          signal,
+          fileStatus,
+          fileWarn,
+          plan.topicKeywords,
+          health,
+          llmManager,
+        );
+        aggregateResults(retryResults, allSources, allQueries, allErrors);
+        criticRetrySourcesAdded = allSources.length - beforeSources;
+        if (criticRetrySourcesAdded > 0) {
+          fileStatus(`✅ [CRITIC] Retry round added ${criticRetrySourcesAdded} new source(s).`);
+
+          // Incrementally grade only the NEW cards against the accepted
+          // ledger, then rebuild the graded list aligned to final source order.
+          const rebuiltCards = buildEvidenceCards(allSources, profile);
+          const verdicts = new Map(gradedCards.map((g) => [g.id, g.critic]));
+          const newCards = rebuiltCards.filter(
+            (c) => !verdicts.has(c.id) && c.verificationTier !== "REJECTED",
+          );
+          if (newCards.length > 0) {
+            const acceptedPrior = gradedCards.filter((g) => g.critic.pass);
+            const retryCritic = await runCritic({
+              cards: newCards,
+              topic: cfg.topic,
+              topicKeywords: plan.topicKeywords,
+              llmManager,
+              status: fileStatus,
+              warn: fileWarn,
+              signal,
+              priorAccepted: acceptedPrior,
+              skill,
+            });
+            criticCallsUsed += retryCritic.callsUsed;
+            criticFailCount += retryCritic.failed.length;
+            for (const gc of [...retryCritic.graded, ...retryCritic.failed]) {
+              verdicts.set(gc.id, gc.critic);
+            }
+          }
+          gradedCards = rebuiltCards
+            .filter((c) => verdicts.has(c.id))
+            .map((c) => ({ ...c, critic: verdicts.get(c.id)! }));
+        }
+      }
+    }
+  }
+
+  // item 5: publish the merged evidence cards + graded ledger onto the shared
+  // blackboard so downstream readers use one coordination surface.
+  {
+    const publishedCards = buildEvidenceCards(allSources, profile);
+    blackboard.mergeCards(publishedCards);
+    blackboard.mergeGraded(gradedCards);
+  }
+
+  // ==========================================
   // FILE LOGGING
   // ==========================================
   const logDir = path.join(os.homedir(), ".deep-swarm-research", "logs");
   const logFile = path.join(logDir, `run_log_${Date.now()}.txt`);
   
   let logContent = `RUN ID: ${Date.now()}\nTOPIC: ${cfg.topic}\n\n`;
+  logContent += `[SKILL] ${skill ? `${skill.name} v${skill.version}${skill.userOverride ? " (override)" : ""}` : "none — no domain tags or pack match"}\n`;
+  if (plan.domainTags?.length) logContent += `[SKILL] Domain tags: ${plan.domainTags.join(", ")}\n`;
   logContent += health.generateReport();
   logContent += llmManager.getReport();
   logContent += "\n\nSEARCH ENGINE ATTRIBUTION\n";
@@ -789,15 +972,50 @@ export async function runSwarm(
   fileStatus(health.generateReport());
   fileStatus(llmManager.getReport());
 
-  if (cfg.enableAdaptiveLearning !== false && !signal.aborted) {
-    await maybeLearnFromRun(cfg, allSources, fileStatus);
-  }
-
   if (hardStopTimer) {
     clearTimeout(hardStopTimer);
     hardStopTimer = null;
   }
   state.flushCache();
+    try {
+      const failState = state as unknown as {
+        _failedUrls: Map<string, unknown>;
+        _failedHosts: Map<string, unknown>;
+      };
+      await persistRunMemory({
+        runId: String(runStartedAt),
+        topic: cfg.topic,
+        topicKeywords: plan.topicKeywords,
+        depthPreset: cfg.depthPreset,
+        focusAreas: cfg.focusAreas,
+        queriesUsed: allQueries,
+        sourceCount: allSources.length,
+        engineHits: [
+          { engine: "ddg", hits: health.ddg.validResults },
+          { engine: "searxng", hits: health.searxng.validResults },
+          ...Object.entries(health.otherEngines).map(([engine, e]) => ({
+            engine,
+            hits: e.validResults,
+          })),
+        ],
+        failedUrls: Array.from(failState._failedUrls.keys()),
+        failedHosts: Array.from(failState._failedHosts.keys()),
+        ledger: gradedCards.map((g) => ({
+          id: g.id,
+          claim: g.relevantClaim,
+          verdict: g.critic.pass ? ("pass" as const) : ("fail" as const),
+          contradiction: Boolean(
+            (g.critic as { contradiction?: boolean }).contradiction,
+          ),
+        })),
+        llmCallsUsed: llmManager.watchdog.llmCallsMade,
+        criticCallsUsed,
+        runtimeSec: Math.round(effectiveRuntimeMs / 1000),
+        usedAI: plan.usedAI,
+      });
+    } catch (err) {
+      console.warn("[memory] persistRunMemory failed", err);
+    }
 
   return {
     sources: allSources,
@@ -805,7 +1023,21 @@ export async function runSwarm(
     workerErrors: allErrors,
     usedAI: plan.usedAI,
     topicKeywords: plan.topicKeywords,
-    runStats: buildRunStats(health, llmManager, state, runStartedAt, sessionLimitMs, effectiveRuntimeMs),
+    gradedCards,
+    criticSummary:
+      criticCallsUsed > 0 || criticFailCount > 0
+        ? {
+            graded: gradedCards.length,
+            failed: criticFailCount,
+            callsUsed: criticCallsUsed,
+            retryRoundSpawned: criticRetryTasksSpawned,
+            retrySourcesAdded: criticRetrySourcesAdded,
+          }
+        : undefined,
+    runStats: buildRunStats(health, llmManager, state, runStartedAt, sessionLimitMs, effectiveRuntimeMs, criticCallsUsed, criticRetrySourcesAdded),
+    domainTags: plan.domainTags,
+    skill,
+    blackboardSnapshot: blackboard.snapshot(),
   };
 }
 
@@ -862,6 +1094,8 @@ function buildRunStats(
   runStartedAt: number,
   sessionLimitMs: number,
   effectiveRuntimeMs: number,
+  criticCallsUsed: number = 0,
+  criticRetrySourcesAdded: number = 0,
 ): NonNullable<OrchestratorResult["runStats"]> {
   const archive = getArchiveState();
   const cache = state.cacheStats();
@@ -881,6 +1115,8 @@ function buildRunStats(
     cacheFile: cache.file,
     cacheMaxAgeDays: cache.maxAgeDays,
     cacheMaxEntries: cache.maxEntries,
+    criticCallsUsed,
+    criticRetrySourcesAdded,
   };
 }
 

@@ -140,7 +140,34 @@ export const AI_CONTRADICTION_TEMPERATURE = 0.15;
 export const AI_CONTRADICTION_TIMEOUT_MS = 15_000;
 export const CONTRADICTION_MAX_SOURCES = 15;
 export const CONTRADICTION_SOURCE_CHARS = 400;
+export const CRITIC_CARDS_PER_BATCH = 6;
+export const CRITIC_MAX_GRADE_BATCHES = 4;
+export const CRITIC_LEDGER_CONTEXT_CARDS = 8;
+export const CRITIC_RETRY_MAX_TASKS = 3;
+export const CRITIC_RETRY_PAGE_BUDGET = 4;
+export const CRITIC_MAX_TOKENS = 900;
+export const CRITIC_TEMPERATURE = 0.1;
+export const CRITIC_TIMEOUT_MS = 30_000;
 export const AI_PLANNING_TIMEOUT_MS = 10_000;
+
+// ---------------------------------------------------------------------------
+// Cross-run layered memory (src/memory/)
+// ---------------------------------------------------------------------------
+export const MEMORY_RETAIN_RUNS_DEFAULT = 6;
+export const MEMORY_MAX_FACTS = 40;
+export const MEMORY_MAX_PROCEDURES = 30;
+export const MEMORY_TOPIC_MIN_SIM = 0.15;
+export const MEMORY_RECALL_RUNS = 3;
+export const MEMORY_RECALL_QUERIES = 8;
+export const MEMORY_RECALL_FAILED_URLS = 10;
+export const MEMORY_RECALL_FAILED_HOSTS = 8;
+export const MEMORY_RECALL_GOOD_ENGINES = 4;
+export const MEMORY_RECALL_FACTS = 12;
+export const MEMORY_RECALL_PROCEDURES = 5;
+export const MEMORY_LEDGER_SNAPSHOT_CARDS = 12;
+export const MEMORY_CONTEXT_MAX_CHARS = 1_500;
+export const MEMORY_EMBEDDING_DETECT_TIMEOUT_MS = 3_000;
+export const MEMORY_EMBED_MAX_TEXTS = 200;
 export const AI_PLANNING_MAX_TOKENS = 500;
 export const AI_PLANNING_TEMPERATURE = 0.4;
 export const AI_MIN_ACCEPTABLE_QUERIES = 4;

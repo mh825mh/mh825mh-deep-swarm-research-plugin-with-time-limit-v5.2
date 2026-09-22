@@ -1,5 +1,5 @@
 import { logLlmDiagnostics } from "../utils/tokens";
-import { askLoadedModel } from "../utils/llm";
+import { askLoadedModel, askStructured } from "../utils/llm";
 import {
   QueryPlan,
   WorkerRole,
@@ -8,7 +8,13 @@ import {
   CrawledSource,
   AgentMessage,
   StatusFn,
+  ResearchPlan,
 } from "../types";
+import {
+  researchPlanSchema,
+  researchPlanJsonSchema,
+  ResearchPlanParsed,
+} from "./schemas";
 import { DIMENSIONS, detectGaps, gapFillQueries } from "./dimensions";
 import {
   DepthProfile,
@@ -75,16 +81,21 @@ function makeDecompositionPrompt(
   const focus = focusAreas.length
     ? `\nFocus areas: ${focusAreas.join(", ")}`
     : "";
-  return `You are a research decomposition system. Given a research topic, output a strict JSON array of specialized worker agents.
+  return `You are a research decomposition system. Given a research topic, output a strict JSON object describing a swarm of specialized workers.
 Topic: "${topic}"${focus}
 
-Each worker object MUST have:
-"role": one of "breadth", "depth", "recency", "academic", "critical", "statistical", "regulatory", "technical", "primary", "comparative"
-"label": descriptive name (e.g., "Clinical Evidence Researcher", "Policy Critic")
-"queries": array of ${Math.min(profile.maxQueriesPerWorker, 6)}-${profile.maxQueriesPerWorker} specific, natural search queries
-"budgetWeight": number 0.1-0.4
-"followLinks": boolean
-"preferredTiers": array of strings
+The JSON object MUST have these keys:
+"workers": array of worker objects, each with:
+  "role": one of "breadth", "depth", "recency", "academic", "critical", "statistical", "regulatory", "technical", "primary", "comparative"
+  "label": descriptive name (e.g., "Clinical Evidence Researcher", "Policy Critic")
+  "queries": array of ${Math.min(profile.maxQueriesPerWorker, 6)}-${profile.maxQueriesPerWorker} specific, natural search queries
+  "budgetWeight": number 0.1-0.4
+  "followLinks": boolean
+"questions": 3-5 open questions the research must answer (string array)
+"stopConditions": 2-4 concrete stopping conditions (string array), e.g. "Found 3 primary sources confirming Q2"
+"estimatedRemainingMs": your estimate of the time this plan needs, as a number (milliseconds)
+"citationPolicy": "index-only"
+"domainTags": 2-5 concise domain tags describing the topic's field, e.g. "medicine", "history", "policy", "technology", "business" (string array)
 
 Rules:
 1. Output ${DECOMPOSITION_MIN_WORKERS} to ${profile.maxDecompositionWorkers} workers.
@@ -94,14 +105,53 @@ Rules:
 JSON:`;
 }
 
+function researchPlanFromParsed(parsed: ResearchPlanParsed): ResearchPlan {
+  const workers: DynamicWorkerSpec[] = parsed.workers.map((w) => ({
+    role: w.role,
+    label: w.label,
+    queries: w.queries,
+    budgetWeight: w.budgetWeight,
+    followLinks: w.followLinks,
+  }));
+  return {
+    workers,
+    questions: parsed.questions,
+    stopConditions: parsed.stopConditions,
+    estimatedRemainingMs: parsed.estimatedRemainingMs,
+    citationPolicy: "index-only",
+    domainTags: parsed.domainTags,
+  };
+}
+
 async function aiDecompose(
   topic: string,
   focusAreas: ReadonlyArray<string>,
   status: StatusFn,
   profile: DepthProfile,
-): Promise<ReadonlyArray<DynamicWorkerSpec> | null> {
+): Promise<ResearchPlan | null> {
+  const prompt = makeDecompositionPrompt(topic, focusAreas, profile);
+
+  // Preferred path: native structured output (JSON schema) with zod validation.
+  const structured = await askStructured(prompt, researchPlanSchema, {
+    system: SYSTEM_INSTRUCTIONS,
+    jsonSchema: researchPlanJsonSchema,
+    maxTokens: AI_DECOMPOSITION_MAX_TOKENS,
+    temperature: AI_DECOMPOSITION_TEMPERATURE,
+    timeoutMs: AI_DECOMPOSITION_TIMEOUT_MS,
+  });
+  if (structured) {
+    const plan = researchPlanFromParsed(structured);
+    if (plan.workers.length >= DECOMPOSITION_MIN_WORKERS) {
+      status(
+        `AI decomposed topic into ${plan.workers.length} structured workers (tags: ${plan.domainTags.join(", ") || "none"})`,
+      );
+      return plan;
+    }
+  }
+
+  // Best-effort fallback: free-text JSON + manual parse.
   const raw = await callLoadedModel(
-    makeDecompositionPrompt(topic, focusAreas, profile),
+    prompt,
     AI_DECOMPOSITION_MAX_TOKENS,
     AI_DECOMPOSITION_TEMPERATURE,
     AI_DECOMPOSITION_TIMEOUT_MS,
@@ -110,10 +160,11 @@ async function aiDecompose(
   try {
     const jsonStr = raw.replace(/```json\s*|```\s*/g, "").trim();
     const parsed = JSON.parse(jsonStr);
-    if (!Array.isArray(parsed) || parsed.length < DECOMPOSITION_MIN_WORKERS)
+    const list = Array.isArray(parsed) ? parsed : parsed.workers;
+    if (!Array.isArray(list) || list.length < DECOMPOSITION_MIN_WORKERS)
       return null;
     const specs: DynamicWorkerSpec[] = [];
-    for (const item of parsed.slice(0, profile.maxDecompositionWorkers)) {
+    for (const item of list.slice(0, profile.maxDecompositionWorkers)) {
       const role = VALID_ROLES.includes(item.role) ? item.role : "breadth";
       const queries = Array.isArray(item.queries)
         ? item.queries
@@ -144,8 +195,28 @@ async function aiDecompose(
       ...s,
       budgetWeight: s.budgetWeight / totalWeight,
     }));
+    const domainTags = Array.isArray(parsed.domainTags)
+      ? parsed.domainTags.filter(
+          (t: unknown) => typeof t === "string" && t.length > 1,
+        )
+      : [];
+    const plan: ResearchPlan = {
+      workers: normalised,
+      questions: Array.isArray(parsed.questions)
+        ? parsed.questions.filter((q: unknown) => typeof q === "string")
+        : [],
+      stopConditions: Array.isArray(parsed.stopConditions)
+        ? parsed.stopConditions.filter((s: unknown) => typeof s === "string")
+        : [],
+      estimatedRemainingMs:
+        typeof parsed.estimatedRemainingMs === "number"
+          ? parsed.estimatedRemainingMs
+          : 0,
+      citationPolicy: "index-only",
+      domainTags,
+    };
     status(`AI decomposed topic into ${normalised.length} specialised workers`);
-    return normalised;
+    return plan;
   } catch {
     return null;
   }
@@ -257,13 +328,17 @@ export async function buildQueryPlan(
   const queriesByRole: Partial<Record<WorkerRole, ReadonlyArray<string>>> = {};
   let usedAI = false;
   let dynamicSpecs: ReadonlyArray<DynamicWorkerSpec> | undefined;
+  let researchPlan: ResearchPlan | undefined;
+  let domainTags: ReadonlyArray<string> | undefined;
   if (useAI) {
     status("AI task decomposition - analysing topic for specialised workers...");
-    const specs = await aiDecompose(topic, focusAreas, status, profile);
-    if (specs && specs.length >= DECOMPOSITION_MIN_WORKERS) {
-      dynamicSpecs = specs;
+    const plan = await aiDecompose(topic, focusAreas, status, profile);
+    if (plan && plan.workers.length >= DECOMPOSITION_MIN_WORKERS) {
+      dynamicSpecs = plan.workers;
+      researchPlan = plan;
+      domainTags = plan.domainTags;
       usedAI = true;
-      for (const spec of specs) {
+      for (const spec of plan.workers) {
         queriesByRole[spec.role] = spec.queries;
       }
     } else {
@@ -327,6 +402,8 @@ export async function buildQueryPlan(
     usedAI,
     topicKeywords,
     dynamicSpecs,
+    researchPlan,
+    domainTags,
   };
 } 
 
